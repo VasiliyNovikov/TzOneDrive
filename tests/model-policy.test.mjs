@@ -10,6 +10,7 @@ import {
 } from '../factory/cli.mjs';
 
 const shipped = JSON.parse(await readFile(new URL('../factory/model-policy.json', import.meta.url), 'utf8'));
+const shippedCatalogDraft = JSON.parse(await readFile(new URL('../factory/model-catalog.json', import.meta.url), 'utf8'));
 const NOW = '2026-09-14T10:00:00.000Z';
 const fixtureToken = 'github_pat_fixture_not_a_credential';
 
@@ -39,7 +40,7 @@ function fixtures() {
       expiresAt: '2026-09-15T09:00:00.000Z', evidence: ['auth']
     },
     models: [
-      model('GPT-6 Astra', 'fixture-astra', ['high', 'xhigh']),
+      model('GPT-6 Astra', 'gpt-6-astra', ['high', 'xhigh']),
       model('Claude Opus 5', 'claude-opus-5', ['medium', 'high', 'max']),
       { ...model('Owner-selected test flagship', 'fixture-visual', ['high']), inputModalities: ['text', 'image'] }
     ]
@@ -67,18 +68,28 @@ function code(expected) {
   return error => error.code === expected;
 }
 
-test('shipped desired policy is explicitly unvalidated, has no guessed Astra ID or visual approval', () => {
+test('shipped desired policy is explicitly unvalidated, records owner-requested IDs, and keeps visual approval null', () => {
   assert.equal(shipped.validationStatus, 'unvalidated');
-  for (const role of ['planning', 'implementation', 'repair']) assert.equal(shipped.roles[role].modelId, null);
+  for (const role of ['planning', 'implementation', 'repair']) assert.equal(shipped.roles[role].modelId, 'gpt-6-astra');
   assert.equal(shipped.roles.review.modelId, 'claude-opus-5');
   assert.equal(shipped.roles.visual, null);
   assert.throws(() => resolve(shipped, null), code('CATALOG_REQUIRED'));
 });
 
+test('shipped catalog records owner attestations but remains fail-closed until authenticated evidence is supplied', () => {
+  assert.equal(shippedCatalogDraft.status, 'draft-unvalidated-owner-attestation');
+  assert.equal(shippedCatalogDraft.ownerAttestations.verificationTimestamp, '2026-09-14T22:04:44Z');
+  assert.equal(shippedCatalogDraft.ownerAttestations.planningImplementationRepair.modelId, 'gpt-6-astra');
+  assert.equal(shippedCatalogDraft.ownerAttestations.review.modelId, 'claude-opus-5');
+  assert.equal(shippedCatalogDraft.authentication.tokenSha256, 'd23b3c894755a5114ecea82ade9850714fd752b6e372b1bf81a6380a0cc6b1c7');
+  assert.equal(shippedCatalogDraft.review.approved, false);
+  assert.throws(() => resolvePolicy(shipped, shippedCatalogDraft, { now: NOW, runId: 'shipped-draft' }), code('CATALOG_EXPIRED'));
+});
+
 test('policy selects each model highest supported effort, not the CLI-wide maximum', () => {
   const { policy, catalog } = fixtures();
   const result = resolve(policy, catalog);
-  assert.equal(result.roles.planning.modelId, 'fixture-astra');
+  assert.equal(result.roles.planning.modelId, 'gpt-6-astra');
   assert.equal(result.roles.planning.effort, 'xhigh');
   assert.equal(result.roles.review.effort, 'max');
   assert.equal(result.roles.implementation.modelId, result.roles.repair.modelId);
@@ -89,13 +100,16 @@ test('policy selects each model highest supported effort, not the CLI-wide maxim
 
 test('unavailable, ambiguous, unreviewed and unverified models fail closed', () => {
   for (const change of [
-    catalog => { catalog.models[0].available = false; },
-    catalog => { catalog.models[0].flagship = false; },
-    catalog => { catalog.models[0].displayName = 'A smaller alternative'; },
-    catalog => { catalog.models.push({ ...catalog.models[0], id: 'ambiguous-id' }); }
+    (_policy, catalog) => { catalog.models[0].available = false; },
+    (_policy, catalog) => { catalog.models[0].flagship = false; },
+    (_policy, catalog) => { catalog.models[0].displayName = 'A smaller alternative'; },
+    (policy, catalog) => {
+      policy.roles.planning.modelId = null;
+      catalog.models.push({ ...catalog.models[0], id: 'ambiguous-id' });
+    }
   ]) {
     const { policy, catalog } = fixtures();
-    change(catalog);
+    change(policy, catalog);
     assert.throws(() => resolve(policy, catalog), code('MODEL_UNAVAILABLE'));
   }
   const { policy, catalog } = fixtures();
@@ -210,7 +224,7 @@ test('tool-less invocation pins model/effort and does not grant shell, write, su
     role: 'implementation', prompt: 'Untrusted text --model auto; $(touch forbidden)', resolved, logDir: '/project/logs'
   });
   assert.deepEqual(args.slice(0, SAFETY_FLAGS.length), SAFETY_FLAGS);
-  assert.equal(args[args.indexOf('--model') + 1], 'fixture-astra');
+  assert.equal(args[args.indexOf('--model') + 1], 'gpt-6-astra');
   assert.equal(args[args.indexOf('--effort') + 1], 'xhigh');
   assert.ok(args.includes('--available-tools='));
   assert.ok(args.some(arg => arg.startsWith('--excluded-tools=task,')));
@@ -248,11 +262,11 @@ test('no successful inference result can be fabricated without supported telemet
 
 test('documented model attribute names alone cannot attest a backend response', () => {
   const attributes = {
-    'gen_ai.request.model': 'fixture-astra',
-    'gen_ai.response.model': 'fixture-astra',
+    'gen_ai.request.model': 'gpt-6-astra',
+    'gen_ai.response.model': 'gpt-6-astra',
     'gen_ai.response.finish_reasons': ['stop']
   };
-  const resolved = { modelId: 'fixture-astra', effort: 'xhigh', responseModelIds: ['fixture-astra'] };
+  const resolved = { modelId: 'gpt-6-astra', effort: 'xhigh', responseModelIds: ['gpt-6-astra'] };
   for (const record of [attributes, { attributes }, { resourceSpans: [{ attributes }] }]) {
     assert.throws(() => verifyTelemetry(`${JSON.stringify(record)}\n`, resolved));
   }
