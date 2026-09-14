@@ -1,5 +1,3 @@
-export const DEFAULT_CUMULATIVE_CAP_USD_CENTS = 500000;
-
 export const INFERENCE_ACTIONS = Object.freeze(['plan', 'implement', 'repair', 'validate']);
 
 const STATUS = new Set(['reserved', 'settled', 'unresolved']);
@@ -77,6 +75,8 @@ export function quarantineMissingBudgetLedger(state, config, now) {
   const runId = typeof state?.runId === 'string' ? state.runId : 'legacy';
   state.budget = createBudgetLedger();
   state.budget.unresolvedUsdCents = cumulativeCapUsdCents;
+  // Reserve the full cap as unresolved so pre-budget work cannot silently receive
+  // fresh allowance; "plan" is only a valid placeholder inference action.
   state.budget.reservations['pre-budget-ledger'] = {
     key: 'pre-budget-ledger',
     action: 'plan',
@@ -151,7 +151,7 @@ export function settleInferenceBudget(state, key, settlement, now) {
     return reservation;
   }
   if (reservation.status === 'unresolved') {
-    throw new BudgetError('budget-settlement-unavailable',
+    throw new BudgetError('budget-reservation-unresolved',
       'Inference budget reservation is unresolved and cannot be settled automatically');
   }
   if (!valid) {
