@@ -21,7 +21,10 @@ export function safePath(rawUrl) {
   return decoded === '/' ? 'index.html' : decoded.slice(1);
 }
 
-export async function createAppServer({ appRoot = path.join(projectRoot, 'app'), stampSource = true } = {}) {
+export async function createAppServer({ appRoot = path.join(projectRoot, 'app'), stampSource = true, basePath = '/' } = {}) {
+  if (!/^\/(?:[a-zA-Z0-9_-]+\/)*$/.test(basePath)) {
+    throw new Error('APP_BASE_PATH must be an absolute directory path with a trailing slash.');
+  }
   const root = await realpath(appRoot);
   const sourceBuild = JSON.parse(await readFile(path.join(root, 'build.json'), 'utf8'));
   const identity = sourceBuild.commit === 'UNSTAMPED' && stampSource
@@ -41,7 +44,9 @@ export async function createAppServer({ appRoot = path.join(projectRoot, 'app'),
       send(405, 'Method not allowed');
       return;
     }
-    const relative = safePath(request.url || '/');
+    const rawUrl = request.url || '/';
+    if (!rawUrl.startsWith(basePath)) { send(404, 'Not found'); return; }
+    const relative = safePath(`/${rawUrl.slice(basePath.length)}`);
     if (!relative) { send(403, 'Forbidden'); return; }
     const resolved = path.resolve(root, relative);
     if (!resolved.startsWith(`${root}${path.sep}`)) {
@@ -78,13 +83,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
     const appRoot = path.resolve(projectRoot, process.env.APP_ROOT || 'app');
     const allowed = [path.join(projectRoot, 'app'), path.join(projectRoot, 'dist', 'app')];
     if (!allowed.includes(appRoot)) throw new Error('APP_ROOT must be app or dist/app; repository browsing is not supported.');
-    const server = await createAppServer({ appRoot });
+    const basePath = process.env.APP_BASE_PATH || '/';
+    const server = await createAppServer({ appRoot, basePath });
     server.on('error', (error) => {
       console.error(`Server failed: ${error.message}`);
       process.exitCode = 1;
     });
     server.listen(port, host, () => {
-      console.log(`Offline viewer: http://${host}:${port} (root: ${path.relative(projectRoot, appRoot)})`);
+      console.log(`Offline viewer: http://${host}:${port}${basePath} (root: ${path.relative(projectRoot, appRoot)})`);
     });
   } catch (error) {
     console.error(`Server failed: ${error.message}`);

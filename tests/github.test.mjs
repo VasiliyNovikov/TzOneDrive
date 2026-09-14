@@ -657,7 +657,7 @@ test('workflow credential boundaries keep controller, browser, inference and LAN
   assert.doesNotMatch(worker + device, /FACTORY_APP_PRIVATE_KEY|FACTORY_GITHUB_TOKEN|permission-[\w-]+: write/);
   assert.match(device, /node factory\/worker\.mjs device-blocked/);
   assert.doesNotMatch(device, /secrets\.|self-hosted|run:.*(?:device\.mjs|playwright|copilot)/);
-  for (const source of [worker, controller, device, await workflowSource('ci'), await workflowSource('factory-mock')]) {
+  for (const source of [worker, controller, device, await workflowSource('ci'), await workflowSource('factory-mock'), await workflowSource('web-preview')]) {
     assert.doesNotMatch(source, /pull_request_target|workflow_run:|continue-on-error:|\|\| true/);
     assert.equal((source.match(/uses: actions\/checkout@/g) || []).length,
       (source.match(/persist-credentials: false/g) || []).length);
@@ -683,4 +683,39 @@ test('secretless CI requires Chromium and bounded mocks, never optional browser 
   assert.match(mock, /MOCK_SCENARIO: \$\{\{ inputs.scenario \}\}/);
   assert.match(mock, /--scenario "\$MOCK_SCENARIO" --max-actions 50 --experiment-ms 60000/);
   assert.doesNotMatch(mock, /secrets\.|: write/);
+});
+
+test('Pages preview publishes only master assets after secretless browser and mock checks', async () => {
+  const source = await workflowSource('web-preview');
+  assert.match(source, /^on:\n  push:\n    branches: \[master\]\n  workflow_dispatch:/m);
+  assert.doesNotMatch(source, /pull_request|workflow_run|secrets\.|self-hosted/);
+  assert.match(source, /^permissions:\n  contents: read\n/m);
+  assert.match(source, /group: github-pages\n  cancel-in-progress: false/);
+  const build = jobSource(source, 'build');
+  const deploy = jobSource(source, 'deploy');
+  for (const job of [build, deploy]) {
+    assert.match(job, /github\.repository == 'VasiliyNovikov\/TzOneDrive'/);
+    assert.match(job, /github\.ref == 'refs\/heads\/master'/);
+  }
+  assert.doesNotMatch(build, /: write|environment:|FACTORY_ENABLED|factory\/(?:worker|device|github-adapter)/);
+  assert.match(build, /BUILD_ID: \$\{\{ github.sha \}\}/);
+  assert.match(build, /ref: \$\{\{ github.sha \}\}/);
+  assert.match(build, /APP_ROOT: dist\/app\n      APP_BASE_PATH: \/TzOneDrive\//);
+  let previous = -1;
+  for (const step of [
+    'run: npm ci --ignore-scripts', 'run: npm test', 'run: npm run check', 'run: npm run build',
+    'run: npx --no-install playwright install --with-deps chromium', 'run: npm run test:browser',
+    'run: npm run factory:mock -- --max-actions 50 --experiment-ms 60000',
+    'uses: actions/upload-pages-artifact@',
+  ]) {
+    const position = build.indexOf(step);
+    assert.ok(position > previous, step);
+    previous = position;
+  }
+  assert.match(build, /path: dist\/app\n          retention-days: 1/);
+  assert.match(deploy, /needs: build/);
+  assert.match(deploy, /permissions:\n      pages: write\n      id-token: write/);
+  assert.match(deploy, /environment:\n      name: github-pages\n      url: \$\{\{ steps.deployment.outputs.page_url \}\}/);
+  assert.match(deploy, /uses: actions\/deploy-pages@[a-f0-9]{40}/);
+  assert.doesNotMatch(deploy, /run:|checkout@|contents: write|FACTORY_|COPILOT_/);
 });
