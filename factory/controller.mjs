@@ -353,6 +353,7 @@ function applyReceipt(state, task, action, receipt, now) {
  * AFTER receipt. Adapters must deduplicate context.idempotencyKey across process restarts.
  * An exception leaves the intent unresolved; {transient:true} schedules a bounded retry
  * of that same key. Pending jobs reuse the key and receive their previous pending receipt.
+ * Non-idempotent handoffs must await context.checkpointPending before the remote effect.
  */
 export async function advance(input, adapter, { now = Date.now(), persist = async () => {}, stop = false } = {}) {
   assertState(input);
@@ -450,6 +451,20 @@ export async function advance(input, adapter, { now = Date.now(), persist = asyn
   task.nextActionAt = null;
   await save();
   let result;
+  let checkpointOpen = true;
+  const checkpointPending = async receipt => {
+    if (!checkpointOpen || intent.pending) throw new Error('Pending checkpoint is closed or already recorded');
+    if (!receipt || receipt.pending !== true || receipt.simulated !== state.simulated ||
+        !Number.isSafeInteger(receipt.nextPollAt) || receipt.nextPollAt <= now) {
+      throw new Error('Invalid pending checkpoint');
+    }
+    intent.pending = clone(receipt);
+    task.history.push({ type: 'pending-checkpoint', action, key: intent.key, at: now, receipt: clone(receipt) });
+    task.status = 'waiting';
+    task.nextActionAt = receipt.nextPollAt;
+    summarize(state);
+    await save();
+  };
   try {
     result = await adapter.execute(action, freeze(clone(task)), freeze({
       mode: state.mode,
@@ -460,10 +475,13 @@ export async function advance(input, adapter, { now = Date.now(), persist = asyn
       poll: Boolean(intent.pending),
       previousReceipt: clone(intent.pending),
       evidence: clone(task.evidence),
+      checkpointPending,
     }));
   } catch (error) {
     if (!error?.transient) throw error;
     result = { transient: true, message: String(error.message) };
+  } finally {
+    checkpointOpen = false;
   }
   if (!result || typeof result !== 'object' || Array.isArray(result)) {
     block(task, 'invalid-adapter-receipt', now);

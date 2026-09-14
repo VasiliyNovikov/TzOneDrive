@@ -5,9 +5,9 @@ import { deflateRawSync } from 'node:zlib';
 import { GitHubAPI, GitHubContentsLedger, GitHubError, extractResult } from '../factory/github-api.mjs';
 import {
   GitHubAdapter, validateEdits, correlation, defaultHead, marker,
-  authorizeController, authorizeDispatch, isEnabled, runProduction, wireKey
+  authorizeController, authorizeDispatch, createAdapter, isEnabled, runProduction, wireKey
 } from '../factory/github-adapter.mjs';
-import { createState } from '../factory/controller.mjs';
+import { advance, createState } from '../factory/controller.mjs';
 import {
   blockedDeviceReceipt, childEnvironment, combineResults, dispatchInputs,
   inferenceAudit, parseReview, runWorker, serializeResult
@@ -170,6 +170,36 @@ test('the factory never manages PR #1 or a marker-free PR', async () => {
   assert.equal(marker('one', 'key'), '<!-- tz-factory task=one key=key -->');
 });
 
+test('existing merges must have the exact tested tree before returning a success receipt', async () => {
+  const head = 'b'.repeat(40);
+  const mergedSha = 'c'.repeat(40);
+  const testedTree = 'd'.repeat(40);
+  for (const matches of [true, false]) {
+    const reads = [];
+    const api = { request: async (method, pathname) => {
+      assert.equal(method, 'GET', 'An existing merge is only inspected, never rewritten');
+      reads.push(pathname);
+      if (pathname === '') return { full_name: config.repository, default_branch: 'master' };
+      if (pathname === '/commits/master') return { sha: mergedSha };
+      if (pathname === `/contents/factory/trusted-config.json?ref=${mergedSha}`) return jsonFile(config);
+      if (pathname === '/pulls/42') return {
+        number: 42, user: { login: config.appBotLogin }, body: marker('one', 'publish-key'),
+        head: { sha: head, repo: { full_name: config.repository } }, base: { ref: 'master', sha },
+        merged: true, merge_commit_sha: mergedSha
+      };
+      if (pathname === `/git/commits/${head}`) return { tree: { sha: testedTree } };
+      if (pathname === `/git/commits/${mergedSha}`) return { tree: { sha: matches ? testedTree : 'e'.repeat(40) } };
+      throw new Error(`Unexpected merge read: ${pathname}`);
+    } };
+    const adapter = new GitHubAdapter({ api });
+    const request = { taskId: 'one', key: 'publish-key', number: 42, head, base: sha };
+    if (matches) assert.deepEqual(await adapter.mergePR(request), { merged: true, sha: mergedSha });
+    else await assert.rejects(adapter.mergePR(request), /Merged tree differs from the tested tree; deployment forbidden/);
+    assert.ok(reads.includes(`/git/commits/${head}`));
+    assert.ok(reads.includes(`/git/commits/${mergedSha}`));
+  }
+});
+
 function dispatchFixture(stage = 'plan') {
   const configured = { ...config, enabled: true, stop: false };
   const state = createState([{ id: 'one', goal: 'Trusted synthetic goal' }], { mode: 'real', now: Date.now() });
@@ -240,15 +270,22 @@ test('adapter dispatch names, input keys and default ref match the workflow hand
   for (const stage of ['plan', 'implement', 'repair', 'validate', 'deploy']) {
     const { api, inputs, workflow } = dispatchFixture(stage);
     const calls = [];
+    const checkpoints = [];
+    const checkpoint = async ticket => { checkpoints.push(structuredClone(ticket)); };
     const remote = {
       list: async () => [],
       request: async (method, path, body) => {
-        if (method === 'POST') { calls.push({ path, body }); return null; }
+        if (method === 'POST') {
+          assert.equal(checkpoints.at(-1)?.key, inputs.key, 'Ticket must be checkpointed before POST');
+          calls.push({ path, body });
+          return null;
+        }
         return api.request(method, path, body);
       }
     };
     const adapter = new GitHubAdapter({ api: remote });
-    const ticket = await adapter.dispatchRun({ ...inputs, taskId: inputs.task });
+    await assert.rejects(adapter.dispatchRun({ ...inputs, taskId: inputs.task }), /durable pending checkpoint/);
+    const ticket = await adapter.dispatchRun({ ...inputs, taskId: inputs.task }, checkpoint);
     assert.equal(ticket.workflow, workflow);
     assert.deepEqual(calls, [{
       path: `/actions/workflows/${workflow}/dispatches`, body: { ref: 'master', inputs }
@@ -257,8 +294,110 @@ test('adapter dispatch names, input keys and default ref match the workflow hand
       id: 123, head_sha: sha, event: 'workflow_dispatch',
       display_title: correlation(inputs.task, stage, inputs.key), actor: { login: config.appBotLogin }
     }];
-    assert.equal((await adapter.dispatchRun({ ...inputs, taskId: inputs.task })).runId, 123);
+    assert.equal((await adapter.dispatchRun({ ...inputs, taskId: inputs.task }, checkpoint)).runId, 123);
     assert.equal(calls.length, 1, 'A persisted intent must not dispatch a duplicate run');
+    assert.equal(checkpoints.at(-1).runId, 123);
+  }
+});
+
+function restartableDispatch(failure) {
+  const fixture = dispatchFixture();
+  let durable = createState([{ id: 'one', goal: 'Trusted synthetic goal' }], {
+    mode: 'real', now: 1000000, limits: { maxPolls: 2 }
+  });
+  let failed = false;
+  let visible = false;
+  let posts = 0;
+  const ticket = () => durable.tasks[0].intent.pending.ticket;
+  const api = {
+    request: async (method, pathname, body) => {
+      if (method === 'POST') {
+        assert.equal(pathname, '/actions/workflows/factory-worker.yml/dispatches');
+        assert.equal(ticket().key, body.inputs.key, 'Durable ticket must exist when POST is attempted');
+        posts++;
+        if (failure === 'ambiguous-transport' && !failed) {
+          failed = true;
+          throw new Error('dispatch accepted, response lost');
+        }
+        return null;
+      }
+      return fixture.api.request(method, pathname, body);
+    },
+    list: async pathname => {
+      if (posts && failure === 'after-post' && !failed) {
+        failed = true;
+        throw new Error('crash after successful POST');
+      }
+      if (!visible || !posts) return [];
+      if (pathname.endsWith('/artifacts')) return [{
+        id: 77, name: `factory-result-${ticket().key}`, expired: false, workflow_run: { id: 123 }
+      }];
+      return [{
+        id: 123, display_title: correlation(ticket().taskId, ticket().stage, ticket().key),
+        head_sha: sha, event: 'workflow_dispatch', actor: { login: config.appBotLogin },
+        path: '.github/workflows/factory-worker.yml', status: 'completed', conclusion: 'success'
+      }];
+    },
+    downloadResult: async () => ({ ...ticket(), plan: 'Recovered trusted plan' })
+  };
+  const persist = next => {
+    const hasTicket = Boolean(next.tasks[0].intent?.pending?.ticket);
+    if (hasTicket && failure === 'checkpoint-storage' && !failed) {
+      failed = true;
+      throw new Error('checkpoint storage failed');
+    }
+    durable = structuredClone(next);
+    if (hasTicket && failure === 'before-post' && !failed) {
+      failed = true;
+      throw new Error('crash after durable checkpoint, before POST');
+    }
+  };
+  return {
+    state: () => durable,
+    posts: () => posts,
+    showRun: () => { visible = true; },
+    step: async () => advance(durable, await createAdapter({ api, env: fixture.env }), {
+      now: durable.tasks[0].nextActionAt ?? durable.updatedAt, persist
+    })
+  };
+}
+
+test('workflow ticket persistence failure prevents dispatch POST', async () => {
+  const run = restartableDispatch('checkpoint-storage');
+  await assert.rejects(run.step(), /checkpoint storage failed/);
+  assert.equal(run.posts(), 0);
+  assert.equal(run.state().tasks[0].intent.pending, null);
+});
+
+test('crash after checkpoint but before POST only polls on restart and blocks within limits', async () => {
+  const run = restartableDispatch('before-post');
+  await assert.rejects(run.step(), /before POST/);
+  const key = run.state().tasks[0].intent.key;
+  assert.equal(run.state().status, 'waiting');
+  for (let index = 0; index < 3; index++) await run.step();
+  assert.equal(run.posts(), 0);
+  assert.equal(run.state().status, 'blocked');
+  assert.equal(run.state().tasks[0].blockedReason, 'poll-limit');
+  assert.equal(run.state().tasks[0].intent.key, key);
+  assert.equal(run.state().tasks[0].attempts.plan, 1);
+});
+
+test('successful or ambiguous dispatch followed by listing lag never POSTs twice after restart', async () => {
+  for (const failure of ['after-post', 'ambiguous-transport']) {
+    const run = restartableDispatch(failure);
+    await assert.rejects(run.step(), /successful POST|response lost/);
+    const savedTicket = structuredClone(run.state().tasks[0].intent.pending.ticket);
+    assert.equal(run.posts(), 1);
+    await run.step();
+    assert.equal(run.posts(), 1);
+    assert.equal(run.state().status, 'waiting');
+    assert.deepEqual(run.state().tasks[0].intent.pending.ticket, savedTicket);
+    run.showRun();
+    await run.step();
+    assert.equal(run.posts(), 1);
+    assert.equal(run.state().tasks[0].stage, 'implement');
+    assert.equal(run.state().tasks[0].evidence.plan.verdict, 'PASS');
+    assert.equal(run.state().tasks[0].attempts.plan, 1);
   }
 });
 

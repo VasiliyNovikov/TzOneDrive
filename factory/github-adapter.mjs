@@ -175,7 +175,8 @@ export class GitHubAdapter {
     return { number: pr.number, head: commit.sha, base: baseSha, branch };
   }
 
-  async dispatchRun({ taskId, stage, key, head, base, harness }) {
+  async dispatchRun({ taskId, stage, key, head, base, harness }, checkpoint) {
+    if (typeof checkpoint !== 'function') throw new Error('Workflow dispatch requires a durable pending checkpoint');
     for (const sha of [head, base, harness]) assertSha(sha);
     const context = await this.trustedContext();
     if (context.sha !== harness) throw new Error('Trusted harness changed before dispatch');
@@ -185,10 +186,13 @@ export class GitHubAdapter {
     const matches = runs.filter(run => run.display_title === title && run.head_sha === harness &&
       run.event === 'workflow_dispatch' && run.actor?.login === context.config.appBotLogin);
     if (matches.length > 1) throw new Error('Ambiguous workflow correlation');
+    const ticket = { taskId, stage, key, head, base, harness, workflow, runId: matches[0]?.id ?? null };
+    // A crash/ambiguous POST after this save permits polling only, never blind redispatch.
+    await checkpoint(ticket);
     if (!matches.length) await this.api.request('POST', `/actions/workflows/${workflow}/dispatches`, {
       ref: context.branch, inputs: { task: taskId, stage, key, head, base, harness }
     });
-    return { taskId, stage, key, head, base, harness, workflow, runId: matches[0]?.id ?? null };
+    return ticket;
   }
 
   async repairApp({ taskId, key, evidence, edits }) {
@@ -265,18 +269,21 @@ export class GitHubAdapter {
         pr.head.repo?.full_name !== REPOSITORY || pr.base.ref !== current.branch || pr.head.sha !== head) {
       throw new Error('Pull request identity/head mismatch');
     }
-    if (pr.merged) return { merged: true, sha: assertSha(pr.merge_commit_sha) };
-    if (current.sha !== base || pr.base.sha !== base) return { merged: false, stale: true };
+    if (!pr.merged && (current.sha !== base || pr.base.sha !== base)) return { merged: false, stale: true };
     const commit = await this.api.request('GET', `/git/commits/${head}`);
-    if (![1, 2].includes(commit.parents.length) || commit.parents[0].sha !== base) throw new Error('Candidate is not based on the tested default head');
-    await validateCandidate(this.api, head, base);
-    const result = await this.api.request('PUT', `/pulls/${number}/merge`, {
-      sha: head, merge_method: 'merge', commit_title: `Factory accepted app task ${taskId}`
-    });
-    if (!result.merged) throw new Error('GitHub refused the exact tested head merge');
-    const merged = await this.api.request('GET', `/git/commits/${assertSha(result.sha)}`);
+    let mergeSha = pr.merged ? assertSha(pr.merge_commit_sha) : null;
+    if (!pr.merged) {
+      if (![1, 2].includes(commit.parents.length) || commit.parents[0].sha !== base) throw new Error('Candidate is not based on the tested default head');
+      await validateCandidate(this.api, head, base);
+      const result = await this.api.request('PUT', `/pulls/${number}/merge`, {
+        sha: head, merge_method: 'merge', commit_title: `Factory accepted app task ${taskId}`
+      });
+      if (!result.merged) throw new Error('GitHub refused the exact tested head merge');
+      mergeSha = assertSha(result.sha);
+    }
+    const merged = await this.api.request('GET', `/git/commits/${mergeSha}`);
     if (merged.tree.sha !== commit.tree.sha) throw new Error('Merged tree differs from the tested tree; deployment forbidden');
-    return { merged: true, sha: result.sha };
+    return { merged: true, sha: mergeSha };
   }
 }
 
@@ -393,11 +400,12 @@ export async function createAdapter(options = {}) {
     const base = ['validate', 'repair'].includes(action) ? context.evidence.implement.baseSha : trusted.sha;
     const head = ['validate', 'repair'].includes(action) ? context.evidence.pr.headSha :
       action === 'deploy' ? context.evidence.merge.mergeSha : trusted.sha;
+    const pending = ticket => ({ pending: true, simulated: false, nextPollAt: context.now + 60000, ticket });
     const ticket = context.previousReceipt?.ticket ?? await adapter.dispatchRun({
       taskId: task.id, stage: action, key, head, base: action === 'deploy' ? head : base, harness: trusted.sha
-    });
+    }, ticket => context.checkpointPending(pending(ticket)));
     const polled = await adapter.pollRun(ticket);
-    if (polled.status === 'pending') return { pending: true, simulated: false, nextPollAt: context.now + 60000, ticket };
+    if (polled.status === 'pending') return pending(ticket);
     if (polled.status === 'failed') return { verdict: 'FAIL', simulated: false, reason: polled.reason };
     const result = polled.result;
     if (['implement', 'repair'].includes(action)) {

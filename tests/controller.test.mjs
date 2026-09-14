@@ -86,6 +86,75 @@ test('a failure saving intent prevents the side effect', async () => {
   }), /disk unavailable/);
 });
 
+test('adapter checkpoint is durably saved before a non-idempotent effect and survives a crash', async () => {
+  let durable;
+  let checkpoint;
+  const pending = { simulated: true, pending: true, jobId: 'job-one', nextPollAt: NOW + 5000 };
+  const persist = next => { durable = structuredClone(next); };
+  await assert.rejects(advance(initial(), {
+    async execute(_action, _task, context) {
+      checkpoint = context.checkpointPending;
+      await checkpoint(pending);
+      assert.deepEqual(durable.tasks[0].intent.pending, pending);
+      assert.equal(durable.status, 'waiting');
+      assert.equal(durable.nextWakeAt, pending.nextPollAt);
+      pending.jobId = 'mutated-after-save';
+      throw new Error('crash after checkpoint');
+    }
+  }, { now: NOW, persist }), /crash after checkpoint/);
+  const key = durable.tasks[0].intent.key;
+  assert.equal(durable.tasks[0].intent.pending.jobId, 'job-one');
+  await assert.rejects(checkpoint(pending), /closed/);
+  const resumed = await advance(durable, {
+    execute(_action, _task, context) {
+      assert.equal(context.idempotencyKey, key);
+      assert.equal(context.poll, true);
+      assert.equal(context.previousReceipt.jobId, 'job-one');
+      return { simulated: true, verdict: 'PASS', plan: 'Recovered plan' };
+    }
+  }, { now: NOW + 5000, persist });
+  assert.equal(resumed.tasks[0].stage, 'implement');
+  assert.equal(resumed.tasks[0].attempts.plan, 1);
+});
+
+test('pending checkpoint persistence failure prevents the following remote effect', async () => {
+  let writes = 0;
+  let effects = 0;
+  await assert.rejects(advance(initial(), {
+    async execute(_action, _task, context) {
+      await context.checkpointPending({ simulated: true, pending: true, nextPollAt: NOW + 5000 });
+      effects++;
+      return { simulated: true, pending: true, nextPollAt: NOW + 5000 };
+    }
+  }, { now: NOW, persist() {
+    if (++writes === 2) throw new Error('checkpoint storage failed');
+  } }), /checkpoint storage failed/);
+  assert.equal(writes, 2);
+  assert.equal(effects, 0);
+});
+
+test('pending checkpoint rejects mode/deadline changes and cannot overwrite an existing ticket', async () => {
+  const pending = { simulated: true, pending: true, nextPollAt: NOW + 5000, jobId: 'job-one' };
+  for (const invalid of [
+    { ...pending, simulated: false }, { ...pending, pending: false },
+    { ...pending, nextPollAt: NOW }, { ...pending, nextPollAt: 'later' }
+  ]) {
+    let writes = 0;
+    await assert.rejects(advance(initial(), {
+      execute(_action, _task, context) { return context.checkpointPending(invalid); }
+    }, { now: NOW, persist() { writes++; } }), /Invalid pending checkpoint/);
+    assert.equal(writes, 1);
+  }
+  const result = await advance(initial(), {
+    async execute(_action, _task, context) {
+      await context.checkpointPending(pending);
+      await assert.rejects(context.checkpointPending({ ...pending, jobId: 'substituted' }), /already recorded/);
+      return pending;
+    }
+  }, { now: NOW });
+  assert.equal(result.tasks[0].intent.pending.jobId, 'job-one');
+});
+
 test('crash between effect and receipt resumes the same key without duplicate effect', async (t) => {
   const directory = await fixture(t);
   await assert.rejects(withStore(directory, async (store) => {

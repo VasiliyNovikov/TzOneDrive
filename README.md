@@ -107,6 +107,13 @@ receipts. Unknown lock ownership requires operator investigation. Expired or
 blocked runs retain their evidence and require a separately approved new run,
 not an automatic retry with erased history.
 
+Production workflow tickets are saved before dispatch. After an interrupted
+or ambiguous handoff, recovery only polls that ticket; it never blindly sends
+the request again. A crash before the request can therefore end in bounded
+blocking with no workflow created. Inspect the evidence before starting a
+separate approved run. Existing merged PRs must still have exactly the tested
+tree before the controller accepts the merge.
+
 The device CLI can also run without hardware:
 
 ```sh
