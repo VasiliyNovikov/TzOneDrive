@@ -51,6 +51,61 @@ Development builds are not deployment attestations. Production must use a
 full, immutable commit as `BUILD_ID` and retain the manifest and package hash.
 Do not publish a signed package or camera images merely because a test passed.
 
+### Hosted browser preview — no TV required
+
+Use **GitHub Pages**, not a GitHub App installation, for static hosting.
+After the workflow is merged into `master` and Pages is configured, the expected
+default preview URL is **https://vasiliynovikov.github.io/TzOneDrive/**.
+The deployment environment reports the actual URL; this link is not a claim
+that the first deployment has already succeeded.
+
+One-time owner setup is tracked in
+[issue #3](https://github.com/VasiliyNovikov/TzOneDrive/issues/3):
+
+1. In **Settings → Pages → Build and deployment**, select **GitHub Actions**.
+2. Restrict the **github-pages** environment to the `master` deployment branch.
+   Required environment reviewers will pause each publish; omit that requirement
+   only if unattended publishing is intended. Keep normal branch protections.
+3. Allow the pinned GitHub-owned Actions used by the workflow, then push/merge to
+   `master`, or select **Actions → Web preview (GitHub Pages) → Run workflow**
+   on `master` to deploy after setup.
+
+Each `master` push runs unit, syntax, build and Chromium checks plus the bounded
+factory mock before uploading **only `dist/app`**. Browser tests exercise the
+built assets under `/TzOneDrive/` at both TV resolutions. The separate deploy job
+publishes that same artifact with Pages/OIDC permissions; it does not check out
+or execute application code. PRs, other branches and forks cannot publish
+through this workflow. Concurrent deployments are serialized without cancelling
+an in-progress publish. Failed checks prevent publication.
+
+This is a public, synthetic-photo preview: Microsoft sign-in is still a
+placeholder. It requires no TV, Azure, inference token, GitHub App private key,
+signing certificate or LAN runner. Do not add private photos or credentials to
+the published assets. Use arrows, Enter and Escape/Backspace as the remote;
+the visible full build ID identifies the deployed commit.
+
+To reproduce the Pages-path checks locally after installing Chromium:
+
+```sh
+npm run build
+APP_ROOT=dist/app APP_BASE_PATH=/TzOneDrive/ npm run test:browser
+# Or serve the built preview for manual testing:
+APP_ROOT=dist/app APP_BASE_PATH=/TzOneDrive/ npm start
+# Open http://localhost:4173/TzOneDrive/
+```
+
+**Factory status:** the browser checks and bounded synthetic factory lifecycle
+can run now, but this does **not** enable autonomous model-driven development or
+physical delivery. The real controller still requires App/inference bootstrap,
+verified model telemetry and a physical acceptance path. Do not flip its enable
+or stop flags to bypass those gates. Owner input and the separate browser-only
+completion target are tracked in
+[issue #5](https://github.com/VasiliyNovikov/TzOneDrive/issues/5).
+Deferred TV, signing, remote, camera and private-host setup is tracked in
+[issue #4](https://github.com/VasiliyNovikov/TzOneDrive/issues/4); it does not block
+Pages. All three issues are assigned to the repository owner. A browser or mock
+PASS must never be presented as physical-TV acceptance.
+
 ## Architecture and boundaries
 
 | Area | Responsibility |
@@ -256,6 +311,7 @@ quotas or usage limits; bounded backoff and experiment deadlines still apply.
 | Workflow | Behavior |
 | --- | --- |
 | `ci.yml` | Secretless unit, syntax, build, required Chromium and mock lifecycle checks on pushes/PRs; ledger pushes are excluded |
+| `web-preview.yml` | Pushes to `master` or manual dispatch on `master`: secretless checks, built Pages-path browser tests and bounded factory mock, then static-only GitHub Pages publishing |
 | `factory-mock.yml` | Owner/default-branch manual dispatch of a bounded synthetic scenario |
 | `factory-controller.yml` | Opt-in owner dispatch or separately enabled schedule; resumes the durable `factory-ledger` branch using a repository-scoped App token |
 | `factory-worker.yml` | App-authorized, intent-correlated planning/implementation/repair; independent browser and review jobs combine matching same-run receipts |
@@ -447,6 +503,7 @@ labels.
 | Capability | Implemented here | Mock coverage | Still unverified / prerequisite |
 | --- | --- | --- | --- |
 | Fixture folders, grid, photo, slideshow, focus | Browser application | Synthetic browser/unit scenarios | Physical remote and installed TV runtime |
+| Hosted web preview | Master-only, test-gated GitHub Pages workflow | Built project-path browser checks and bounded factory mock | Owner Pages/environment setup and first successful deployment; not real factory activation |
 | Build/runtime diagnostics | Bundled diagnostic UI | Build/keyboard checks | Read actual GQ32LS03CBUXZG display |
 | Task lifecycle and recovery | Deterministic controller and durable state | Full lifecycle and failure injection | Live App permissions and Actions handoffs |
 | Copilot execution | Pinned CLI wrapper, explicit role policy | Model/fallback/override failure cases | Authenticated flagship availability, effort, telemetry and visual approval |
