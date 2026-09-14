@@ -130,6 +130,10 @@ export function settleInferenceBudget(state, key, settlement, now) {
     }
     return reservation;
   }
+  if (reservation.status === 'unresolved') {
+    throw new BudgetError('budget-settlement-unavailable',
+      'Inference budget reservation is unresolved and cannot be settled automatically');
+  }
   if (!valid) {
     reservation.status = 'unresolved';
     reservation.reason = 'missing-trustworthy-cost';

@@ -462,7 +462,7 @@ export async function advance(input, adapter, { now = Date.now(), persist = asyn
         reservedUsdCents: costBound?.reservedUsdCents, now,
       });
     } catch (error) {
-      block(task, error instanceof BudgetError ? error.code : 'budget-cost-bound-unavailable', now);
+      block(task, error instanceof BudgetError ? error.code : 'budget-quote-failed', now);
       settle(state, now);
       return save();
     }
