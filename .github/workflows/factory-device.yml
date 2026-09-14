@@ -1,0 +1,104 @@
+name: Device handoff (BLOCKED pending private bootstrap)
+run-name: factory:${{ inputs.task }}:${{ inputs.stage }}:${{ inputs.key }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: Durable task ID
+        required: true
+        type: string
+      stage:
+        description: deploy only
+        required: true
+        type: string
+      key:
+        description: Durable intent correlation key
+        required: true
+        type: string
+      head:
+        description: Validated merged default commit
+        required: true
+        type: string
+      base:
+        description: Same immutable merged commit
+        required: true
+        type: string
+      harness:
+        description: Current trusted default-branch commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: factory-device-${{ inputs.task }}-${{ inputs.stage }}-${{ inputs.key }}
+  cancel-in-progress: false
+
+env:
+  FACTORY_TASK: ${{ inputs.task }}
+  FACTORY_STAGE: ${{ inputs.stage }}
+  FACTORY_KEY: ${{ inputs.key }}
+  FACTORY_HEAD: ${{ inputs.head }}
+  FACTORY_BASE: ${{ inputs.base }}
+  FACTORY_HARNESS: ${{ inputs.harness }}
+  FACTORY_ENABLED: ${{ vars.FACTORY_ENABLED }}
+  FACTORY_STOP: ${{ vars.FACTORY_STOP }}
+  FACTORY_APP_ID: ${{ vars.FACTORY_APP_ID }}
+
+# Deliberately no LAN job or configurable runs-on. Labels/if/environment approvals
+# cannot keep a different public workflow off a repository-level private runner.
+# Before replacing this stub, enforce runner admission outside this repository,
+# isolate private camera/inference evidence, and bridge tested/merged source and
+# unsigned-manifest/signed-widget hashes to the controller's receipt contract.
+jobs:
+  authorize:
+    if: >-
+      github.repository == 'VasiliyNovikov/TzOneDrive' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      vars.FACTORY_ENABLED == 'true' && vars.FACTORY_STOP != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Require App intent and validated merged-PR provenance in the cloud
+        env:
+          FACTORY_READ_TOKEN: ${{ github.token }}
+        run: node factory/worker.mjs gate
+
+  blocked:
+    needs: authorize
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Return INCONCLUSIVE; no install, launch, camera or acceptance attempted
+        env:
+          FACTORY_READ_TOKEN: ${{ github.token }}
+        run: node factory/worker.mjs device-blocked
+      - name: Public receipt contains only correlation and a fixed bootstrap reason
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: factory-result-${{ inputs.key }}
+          path: .factory-output/final/result.json
+          archive: true
+          compression-level: 0
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1

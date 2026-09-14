@@ -1,0 +1,227 @@
+name: Authorized cloud factory worker
+run-name: factory:${{ inputs.task }}:${{ inputs.stage }}:${{ inputs.key }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: Durable task ID
+        required: true
+        type: string
+      stage:
+        description: plan, implement, repair or validate
+        required: true
+        type: string
+      key:
+        description: Durable intent correlation key
+        required: true
+        type: string
+      head:
+        description: Immutable application commit
+        required: true
+        type: string
+      base:
+        description: Immutable candidate base
+        required: true
+        type: string
+      harness:
+        description: Current trusted default-branch commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: factory-worker-${{ inputs.task }}-${{ inputs.stage }}-${{ inputs.key }}
+  cancel-in-progress: false
+
+env:
+  FACTORY_TASK: ${{ inputs.task }}
+  FACTORY_STAGE: ${{ inputs.stage }}
+  FACTORY_KEY: ${{ inputs.key }}
+  FACTORY_HEAD: ${{ inputs.head }}
+  FACTORY_BASE: ${{ inputs.base }}
+  FACTORY_HARNESS: ${{ inputs.harness }}
+  FACTORY_ENABLED: ${{ vars.FACTORY_ENABLED }}
+  FACTORY_STOP: ${{ vars.FACTORY_STOP }}
+  FACTORY_APP_ID: ${{ vars.FACTORY_APP_ID }}
+
+jobs:
+  authorize:
+    if: >-
+      github.repository == 'VasiliyNovikov/TzOneDrive' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      vars.FACTORY_ENABLED == 'true' && vars.FACTORY_STOP != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      stage: ${{ steps.gate.outputs.stage }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Require installed App actor and current durable intent
+        id: gate
+        env:
+          FACTORY_READ_TOKEN: ${{ github.token }}
+        run: node factory/worker.mjs gate
+
+  infer:
+    needs: authorize
+    if: contains(fromJSON('["plan","implement","repair"]'), needs.authorize.outputs.stage)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    # Only a scope-reviewed, inference-only PAT belongs in this environment.
+    environment: factory-inference
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Reauthorize before installing or invoking inference
+        env:
+          FACTORY_READ_TOKEN: ${{ github.token }}
+        run: node factory/worker.mjs gate
+      - name: Install exact production CLI without lifecycle scripts
+        run: npm install --prefix .factory-tools --no-save --package-lock=false --ignore-scripts --no-audit --no-fund @github/copilot@1.0.83
+      - name: Propose bounded data; no browser, shell tools or repository-write token
+        env:
+          FACTORY_READ_TOKEN: ${{ github.token }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          FACTORY_CLI_PATH: ${{ github.workspace }}/.factory-tools/node_modules/.bin/copilot
+        run: node factory/worker.mjs infer
+      - name: Publish only the bounded structured receipt, never prompts or CLI logs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: factory-result-${{ inputs.key }}
+          path: .factory-output/final/result.json
+          archive: true
+          compression-level: 0
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  tests:
+    needs: authorize
+    if: needs.authorize.outputs.stage == 'validate'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.factory-runtime/browsers
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Reauthorize before preparing the independent browser worker
+        env:
+          FACTORY_READ_TOKEN: ${{ github.token }}
+        run: node factory/worker.mjs gate
+      - run: npm ci --ignore-scripts
+      - run: npx --no-install playwright install --with-deps chromium
+      - name: Build and test app-only snapshot using the default-branch harness
+        env:
+          FACTORY_READ_TOKEN: ${{ github.token }}
+        run: node factory/worker.mjs validate
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: factory-tests-${{ inputs.key }}
+          path: .factory-output/tests/result.json
+          archive: true
+          compression-level: 0
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  review:
+    needs: authorize
+    if: needs.authorize.outputs.stage == 'validate'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    environment: factory-inference
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Reauthorize independent review (separate from browser and implementation)
+        env:
+          FACTORY_READ_TOKEN: ${{ github.token }}
+        run: node factory/worker.mjs gate
+      - run: npm install --prefix .factory-tools --no-save --package-lock=false --ignore-scripts --no-audit --no-fund @github/copilot@1.0.83
+      - name: Independent policy-pinned CLI review; application source is data only
+        env:
+          FACTORY_READ_TOKEN: ${{ github.token }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          FACTORY_CLI_PATH: ${{ github.workspace }}/.factory-tools/node_modules/.bin/copilot
+        run: node factory/worker.mjs review
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: factory-review-${{ inputs.key }}
+          path: .factory-output/review/result.json
+          archive: true
+          compression-level: 0
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  combine:
+    needs: [authorize, tests, review]
+    if: needs.authorize.outputs.stage == 'validate'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Reauthorize before consuming same-run receipts
+        env:
+          FACTORY_READ_TOKEN: ${{ github.token }}
+        run: node factory/worker.mjs gate
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: factory-tests-${{ inputs.key }}
+          path: .factory-output/tests
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: factory-review-${{ inputs.key }}
+          path: .factory-output/review
+          digest-mismatch: error
+      - name: Correlate independent evidence without executing app code
+        env:
+          FACTORY_READ_TOKEN: ${{ github.token }}
+        run: node factory/worker.mjs combine
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: factory-result-${{ inputs.key }}
+          path: .factory-output/final/result.json
+          archive: true
+          compression-level: 0
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1

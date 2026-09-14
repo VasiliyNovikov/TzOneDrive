@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<widget xmlns="http://www.w3.org/ns/widgets"
+        xmlns:tizen="http://tizen.org/ns/widgets"
+        id="https://example.invalid/TzOneDrive"
+        version="1.0.0" viewmodes="maximized">
+  <tizen:application id="TzOneDrive.PhotoViewer" package="TzOneDrive" required_version="7.0"/>
+  <content src="index.html"/>
+  <name>OneDrive Photos — Offline Preview</name>
+  <icon src="assets/icon.svg"/>
+  <description>A remote-first, read-only synthetic photo viewer. No Microsoft account connection.</description>
+  <tizen:profile name="tv-samsung"/>
+  <tizen:privilege name="http://tizen.org/privilege/tv.inputdevice"/>
+  <tizen:setting screen-orientation="landscape" context-menu="disable"
+                 background-support="disable" encryption="disable"
+                 install-location="auto" hwkey-event="enable"/>
+  <tizen:content-security-policy>default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'none'; media-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'</tizen:content-security-policy>
+</widget>

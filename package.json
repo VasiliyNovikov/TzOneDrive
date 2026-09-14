@@ -1,0 +1,29 @@
+{
+  "name": "tzonedrive",
+  "version": "1.0.0",
+  "description": "OneDrive for Tizen TV",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node scripts/serve.mjs",
+    "build": "node scripts/build.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "test:browser": "playwright test",
+    "check": "node scripts/check.mjs",
+    "factory:mock": "node factory/main.mjs mock",
+    "factory:preflight": "node factory/cli.mjs preflight"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/VasiliyNovikov/TzOneDrive.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}
