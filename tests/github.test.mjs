@@ -540,6 +540,13 @@ test('production persists stopped or model-blocked state without any remote work
   assert.equal(stopped.writes.length, 1);
   assert.equal(JSON.parse(Buffer.from(stopped.writes[0].body.content, 'base64')).status, 'stopped');
 
+  const legacy = controllerFixture();
+  legacy.configured.enabled = false;
+  delete legacy.state.budget;
+  const legacyState = await runProduction({ api: legacy.api, env: legacy.env });
+  assert.equal(legacyState.budget.unresolvedUsdCents, config.inferenceBudget.cumulativeCapUsdCents);
+  assert.equal(legacyState.budget.reservations['pre-budget-ledger'].reason, 'pre-budget-accounting-missing');
+
   const blocked = controllerFixture();
   const blockedState = await runProduction({ api: blocked.api, env: blocked.env });
   assert.equal(blockedState.status, 'blocked');

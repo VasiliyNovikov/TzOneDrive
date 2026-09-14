@@ -39,18 +39,16 @@ export function assertBudgetLedger(budget) {
       typeof budget.reservations !== 'object') {
     throw new BudgetError('budget-invalid-ledger', 'Invalid inference budget accounting');
   }
-  const keys = new Set();
   let settled = 0;
   let reserved = 0;
   let unresolved = 0;
   for (const [key, item] of Object.entries(budget.reservations)) {
-    if (!item || typeof item.key !== 'string' || item.key !== key || keys.has(item.key) || !STATUS.has(item.status) ||
+    if (!item || typeof item.key !== 'string' || item.key !== key || !STATUS.has(item.status) ||
         !INFERENCE_ACTIONS.includes(item.action) || typeof item.taskId !== 'string' ||
         typeof item.runId !== 'string' || !Number.isSafeInteger(item.createdAt) ||
         !Number.isSafeInteger(item.reservedUsdCents) || item.reservedUsdCents < 0) {
       throw new BudgetError('budget-invalid-ledger', 'Invalid inference budget reservation');
     }
-    keys.add(item.key);
     if (item.status === 'settled') {
       if (!Number.isSafeInteger(item.settledUsdCents) || item.settledUsdCents < 0 ||
           item.settledUsdCents > item.reservedUsdCents || typeof item.settlementKey !== 'string' ||
@@ -70,6 +68,26 @@ export function assertBudgetLedger(budget) {
     throw new BudgetError('budget-invalid-ledger', 'Cumulative inference spend does not match settled reservations');
   }
   return budget;
+}
+
+export function quarantineMissingBudgetLedger(state, config, now) {
+  if (state?.budget !== undefined) return false;
+  const { cumulativeCapUsdCents } = validateTrustedBudget(config);
+  const taskId = typeof state?.tasks?.[0]?.id === 'string' ? state.tasks[0].id : 'legacy';
+  const runId = typeof state?.runId === 'string' ? state.runId : 'legacy';
+  state.budget = createBudgetLedger();
+  state.budget.unresolvedUsdCents = cumulativeCapUsdCents;
+  state.budget.reservations['pre-budget-ledger'] = {
+    key: 'pre-budget-ledger',
+    action: 'plan',
+    taskId,
+    runId,
+    reservedUsdCents: cumulativeCapUsdCents,
+    status: 'unresolved',
+    createdAt: now,
+    reason: 'pre-budget-accounting-missing',
+  };
+  return true;
 }
 
 export function budgetVisibility(budget, config) {
@@ -115,6 +133,8 @@ export function reserveInferenceBudget(state, config, { key, action, taskId, run
   return reservation;
 }
 
+// If trustworthy cost is missing, this intentionally mutates the reservation to
+// unresolved before throwing so callers that persist the state do not release it.
 export function settleInferenceBudget(state, key, settlement, now) {
   assertBudgetLedger(state.budget);
   const reservation = state.budget.reservations[key];

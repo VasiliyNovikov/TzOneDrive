@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { INFERENCE_ACTIONS, validateTrustedBudget } from './budget.mjs';
+import { INFERENCE_ACTIONS, assertBudgetLedger, quarantineMissingBudgetLedger, validateTrustedBudget } from './budget.mjs';
 import { GitHubAPI, GitHubContentsLedger, REPOSITORY } from './github-api.mjs';
 import { resolvePolicy } from './model-policy.mjs';
 
@@ -354,6 +354,7 @@ export async function authorizeDispatch(api, inputs, env = process.env) {
     throw new Error('Dispatch disagrees with its persisted workflow ticket');
   }
   if (INFERENCE_ACTIONS.includes(inputs.stage)) {
+    assertBudgetLedger(state.budget);
     const reservation = state.budget.reservations[task.intent.key];
     if (!reservation || reservation.status !== 'reserved' || reservation.action !== inputs.stage ||
         reservation.taskId !== inputs.task || reservation.runId !== state.runId) {
@@ -466,6 +467,7 @@ export async function runProduction({ env = process.env, api } = {}) {
     version = next;
   };
   if (!state) state = createState(config.backlog, { mode: 'real' });
+  else if (quarantineMissingBudgetLedger(state, config, Date.now())) await persist(state);
   assertState(state);
   if (state.mode !== 'real') throw new Error('Production ledger cannot contain simulated state');
   if (!isEnabled(config, env)) {
