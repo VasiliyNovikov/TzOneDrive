@@ -7,7 +7,8 @@ import { ACCEPTANCE_STEPS, VISUAL_CRITERIA } from '../factory/acceptance.mjs';
 import { runDevice } from '../factory/device.mjs';
 import { advance, createState, validationGate } from '../factory/controller.mjs';
 import {
-  evidenceDigest, isPrivateDeviceReceipt, runPrivateDeviceBridge, validateDeviceReceipt, validatePrivateDeviceReports,
+  deviceReceiptForStage, evidenceDigest, isPrivateDeviceReceipt, runPrivateDeviceBridge,
+  summarizePrivateDeviceReports, validateDeviceReceipt, validatePrivateDeviceReports,
   validateTestedManifest, verifyPrivateCheckout, verifyWidgetBytes, withPrivateDeviceAttempt,
 } from '../factory/device-bridge.mjs';
 
@@ -184,6 +185,130 @@ test('private report schema positive fixture checks every step and fresh ordered
     mutate(invalid);
     assert.throws(() => validatePrivateDeviceReports(deploy, invalid, expectedBuild, context));
   }
+});
+
+function unsuccessfulAcceptance(verdict) {
+  const value = reports();
+  value.acceptance.status = verdict;
+  value.acceptance.gateEligible = false;
+  if (verdict === 'FAIL') {
+    value.acceptance.reasonCode = 'VISUAL_ASSERTION_FAILED';
+    value.acceptance.steps = value.acceptance.steps.slice(0, 4);
+    value.acceptance.evidence = value.acceptance.evidence.slice(0, 8);
+    Object.assign(value.acceptance.steps[3], { verdict: 'FAIL' });
+    Object.assign(value.acceptance.steps[3].criteria, { afterState: false, remoteResponse: false });
+    value.acceptance.checks.visualAssertions = 'FAIL';
+  } else {
+    value.acceptance.reasonCode = 'CAMERA_UNAVAILABLE';
+    value.acceptance.observedBuild = null;
+    value.acceptance.steps = [];
+    value.acceptance.evidence = [];
+  }
+  return value;
+}
+
+test('successful signed deployment remains PASS when nested physical acceptance fails or is unavailable', () => {
+  for (const verdict of ['FAIL', 'INCONCLUSIVE']) {
+    const { deploy, acceptance, expectedBuild, context: timing } = unsuccessfulAcceptance(verdict);
+    const summary = summarizePrivateDeviceReports(deploy, acceptance, expectedBuild, timing);
+    assert.equal(summary.verdict, 'PASS');
+    assert.equal(summary.acceptance.verdict, verdict);
+    assert.equal(summary.signedPackageSha256, deploy.artifact.sha256);
+    assert.equal(summary.acceptance.reportSha256, evidenceDigest(acceptance));
+    assert.equal(summary.acceptance.observedCommit, null);
+    assert.equal(summary.acceptance.observedBuildId, null);
+    assert.equal(isPrivateDeviceReceipt(summary), false);
+    const { receipt, task, context } = fixture();
+    const deployment = { ...receipt, ...summary };
+    assert.equal(deviceReceiptForStage(deployment, 'deploy', context), deployment);
+    // Seed a synthetic durable install receipt; this test does not grant real producer provenance.
+    task.evidence.deploy = { ...deployment, key: deployment.deployKey, recordedAt: NOW };
+    task.stage = 'accept';
+    task.intent = { action: 'accept' };
+    const routed = deviceReceiptForStage(deployment, 'accept', context);
+    assert.equal(routed.verdict, verdict);
+    assert.equal(routed.signedPackageSha256, deployment.signedPackageSha256);
+    assert.deepEqual(routed.acceptance, deployment.acceptance);
+    assert.equal(isPrivateDeviceReceipt(routed), false);
+    assert.equal(validateDeviceReceipt(routed, context), routed);
+    assert.throws(() => validateDeviceReceipt(deployment, context), /identity mismatch/);
+    assert.throws(() => validateDeviceReceipt({ ...routed, verdict: 'PASS' }, context));
+    assert.throws(() => deviceReceiptForStage({ ...deployment, verdict }, 'accept', context), /successful deployment/);
+    assert.throws(() => deviceReceiptForStage(deployment, 'deploy', context), /identity mismatch/);
+    delete task.evidence.deploy;
+    assert.throws(() => deviceReceiptForStage(deployment, 'accept', context), /recorded successful deployment/);
+  }
+});
+
+test('routed camera FAIL creates acceptance repair and INCONCLUSIVE retries only acceptance, never install', async () => {
+  for (const verdict of ['FAIL', 'INCONCLUSIVE']) {
+    const { state, task, receipt } = fixture();
+    const { deploy, acceptance, expectedBuild, context: timing } = unsuccessfulAcceptance(verdict);
+    const deployment = { ...receipt, ...summarizePrivateDeviceReports(deploy, acceptance, expectedBuild, timing) };
+    // Model a durable successful install, not physical evidence fabricated by a test adapter.
+    task.stage = 'accept';
+    task.intent = null;
+    task.attempts.deploy = 1;
+    task.evidence.deploy = { ...deployment, key: deployment.deployKey, recordedAt: NOW };
+    const actions = [];
+    const adapter = { execute(action, current, context) {
+      actions.push(action);
+      assert.equal(action, 'accept', 'The stored camera outcome must not cause deploy/reinstall');
+      return deviceReceiptForStage(deployment, action, {
+        task: current, runId: context.runId, deployKey: deployment.deployKey, now: context.now,
+      });
+    } };
+    let result = await advance(state, adapter, { now: NOW });
+    assert.equal(result.tasks[0].evidence.deploy.verdict, 'PASS');
+    assert.equal(result.tasks[0].evidence.accept.verdict, verdict);
+    assert.equal(result.tasks[0].delivery, undefined);
+    if (verdict === 'FAIL') {
+      assert.equal(result.tasks[0].status, 'repair');
+      assert.equal(result.tasks[1].sourceTaskId, task.id);
+      assert.equal(result.tasks[1].evidence.repairRequest.reason, 'physical-acceptance-failed');
+      assert.equal(result.tasks[0].blockedReason, undefined);
+      assert.deepEqual(actions, ['accept']);
+    } else {
+      assert.equal(result.tasks[0].stage, 'accept');
+      assert.equal(result.status, 'waiting');
+      while (result.status === 'waiting') result = await advance(result, adapter, { now: result.nextWakeAt });
+      assert.equal(result.status, 'blocked');
+      assert.equal(result.tasks[0].blockedReason, 'inconclusive-limit');
+      assert.equal(result.tasks[0].attempts.deploy, 1);
+      assert.equal(result.tasks[0].inconclusive.deploy, undefined);
+      assert.deepEqual(actions, ['accept', 'accept', 'accept']);
+    }
+    assert.ok(result.tasks.every(current => current.delivery === undefined));
+  }
+});
+
+test('negative acceptance summaries retain privacy and cannot claim a physical PASS gate', () => {
+  const { deploy, acceptance, expectedBuild, context } = unsuccessfulAcceptance('FAIL');
+  acceptance.observedBuild = { commit: 'PRIVATE_CAMERA_TEXT', buildId: '/private/frame.png' };
+  acceptance.reason = 'PRIVATE_CAMERA_TEXT /private/frame.png';
+  const summary = summarizePrivateDeviceReports(deploy, acceptance, expectedBuild, context);
+  assert.equal(summary.verdict, 'PASS', 'Only the installation passed');
+  assert.ok(!JSON.stringify(summary).includes('PRIVATE_CAMERA_TEXT'));
+  assert.ok(!JSON.stringify(summary).includes('/private/frame.png'));
+  for (const changed of [
+    { ...acceptance, gateEligible: true }, { ...acceptance, reasonCode: 'ACCEPTED' },
+    { ...acceptance, mode: 'mock' }, { ...acceptance, publicArtifactsAllowed: true },
+    { ...acceptance, expectedBuild: { commit: TESTED, buildId: TESTED } },
+    { ...acceptance, completedAt: iso(NOW + 1) },
+  ]) assert.throws(() => summarizePrivateDeviceReports(deploy, changed, expectedBuild, context));
+  for (const status of ['FAIL', 'INCONCLUSIVE']) {
+    assert.throws(() => summarizePrivateDeviceReports({ ...deploy, status }, acceptance, expectedBuild, context));
+  }
+  const good = reports();
+  const { receipt, task, context: receiptContext } = fixture();
+  const deployment = { ...receipt, ...summarizePrivateDeviceReports(good.deploy, good.acceptance, good.expectedBuild, good.context) };
+  task.stage = 'accept';
+  task.intent = { action: 'accept' };
+  task.evidence.deploy = { ...deployment, key: deployment.deployKey, recordedAt: NOW };
+  const routed = deviceReceiptForStage(deployment, 'accept', receiptContext);
+  assert.equal(routed.verdict, 'PASS');
+  assert.equal(isPrivateDeviceReceipt(routed), false, 'Routing cannot turn synthetic PASS into physical provenance');
+  assert.throws(() => deviceReceiptForStage(deployment, 'accept', { ...receiptContext, now: NOW + 600001 }), /stale/);
 });
 
 test('actual mock controls remain non-physical and failed evidence cannot satisfy report validation', async t => {

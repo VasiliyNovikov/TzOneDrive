@@ -316,6 +316,14 @@ verdicts, not frames or diagnostics. Its schema validator checks correlation,
 transport before connecting receipts to the controller. No local synthetic
 receipt test constitutes physical acceptance.
 
+A verified installation keeps a deployment PASS even if its nested camera
+verdict is FAIL or INCONCLUSIVE. `deviceReceiptForStage` routes that same receipt
+to the controller's separate acceptance stage: FAIL can trigger acceptance
+repair, and INCONCLUSIVE does not reinstall the package. Polling acceptance
+must not call deployment again. Only an acceptance PASS can mean delivery.
+The routing helper preserves provenance only for concrete in-process bridge
+receipts; parsing JSON or relabeling a mock cannot grant that provenance.
+
 Configure credentials only after reviewing the default-branch harness:
 
 | Setting | Location and boundary |

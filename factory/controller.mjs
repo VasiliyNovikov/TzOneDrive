@@ -510,7 +510,7 @@ export async function advance(input, adapter, { now = Date.now(), persist = asyn
     block(task, 'invalid-verdict', now);
   } else {
     if (state.mode === 'real' && ['deploy', 'accept'].includes(action)) {
-      if (result.verdict === 'PASS') {
+      if (result.verdict === 'PASS' || isPrivateDeviceReceipt(result)) {
         try {
           if (!isPrivateDeviceReceipt(result) || validationGate(task, 'real')) {
             throw new Error('Concrete private execution and independent validation are required');

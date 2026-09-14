@@ -126,11 +126,15 @@ export function verifyWidgetBytes(bytes, manifest, signedSha256) {
 }
 
 export function validatePrivateDeviceReports(deploy, acceptance, expected, { startedAt, now }) {
+  if (!Number.isSafeInteger(startedAt) || !Number.isSafeInteger(now) || now < startedAt) {
+    fail('Invalid private report time bounds');
+  }
   for (const [report, operation] of [[deploy, 'deploy'], [acceptance, 'accept']]) {
     const start = Date.parse(report?.startedAt);
     const end = Date.parse(report?.completedAt);
     if (report?.schemaVersion !== 1 || report.operation !== operation || report.mode !== 'real' ||
-        report.status !== 'PASS' || report.publicArtifactsAllowed !== false ||
+        !(operation === 'deploy' ? ['PASS'] : ['PASS', 'FAIL', 'INCONCLUSIVE']).includes(report.status) ||
+        report.publicArtifactsAllowed !== false ||
         !same(report.expectedBuild, expected) || !Number.isSafeInteger(start) ||
         !Number.isSafeInteger(end) || start < startedAt || end < start || end > now ||
         now - end > MAX_AGE_MS || end - start > MAX_AGE_MS) fail('Invalid or stale private device report');
@@ -141,7 +145,17 @@ export function validatePrivateDeviceReports(deploy, acceptance, expected, { sta
       deploy.artifact.name !== 'TzOneDrive.wgt' || !HASH.test(deploy.artifact.sha256) ||
       deploy.artifact.synthetic !== false) fail('Deployment did not install a concrete signed widget');
   if (Date.parse(acceptance.startedAt) < Date.parse(deploy.completedAt) ||
-      acceptance.reasonCode !== 'ACCEPTED' || acceptance.gateEligible !== true ||
+      !Array.isArray(acceptance.steps) || acceptance.steps.length > ACCEPTANCE_STEPS.length ||
+      !Array.isArray(acceptance.evidence) || acceptance.evidence.length > ACCEPTANCE_STEPS.length * 2) {
+    fail('Invalid acceptance report ordering or bounds');
+  }
+  if (acceptance.status !== 'PASS') {
+    if (acceptance.gateEligible !== false || acceptance.reasonCode === 'ACCEPTED') {
+      fail('Unsuccessful acceptance must not claim a physical gate');
+    }
+    return;
+  }
+  if (acceptance.reasonCode !== 'ACCEPTED' || acceptance.gateEligible !== true ||
       !same(acceptance.observedBuild, expected) ||
       !['connected', 'buildIdentity', 'freshFrames', 'readable', 'unobstructed', 'visualAssertions']
         .every(key => acceptance.checks?.[key] === 'PASS') ||
@@ -173,17 +187,36 @@ export function validatePrivateDeviceReports(deploy, acceptance, expected, { sta
   }
 }
 
+// Data projection only: neither this summary nor its validators grant producer provenance.
+export function summarizePrivateDeviceReports(deploy, acceptance, expected, timing) {
+  validatePrivateDeviceReports(deploy, acceptance, expected, timing);
+  return {
+    verdict: 'PASS',
+    signedPackageSha256: deploy.artifact.sha256,
+    deploymentReportSha256: evidenceDigest(deploy),
+    acceptance: {
+      verdict: acceptance.status, source: 'physical-camera',
+      observedCommit: acceptance.status === 'PASS' ? acceptance.observedBuild.commit : null,
+      observedBuildId: acceptance.status === 'PASS' ? acceptance.observedBuild.buildId : null,
+      frameCount: acceptance.evidence.length, stepCount: acceptance.steps.length,
+      evidenceSha256: evidenceDigest(acceptance.evidence), reportSha256: evidenceDigest(acceptance),
+    },
+  };
+}
+
 // This is a schema/correlation check, NOT authentication or external runner admission.
 // A future trusted transport must authenticate the producer before using this receipt.
-export function validateDeviceReceipt(receipt, { task, runId, deployKey, now }) {
+export function validateDeviceReceipt(receipt, { task, runId, deployKey, now, action = task.intent?.action }) {
   const fields = ['schemaVersion', 'kind', 'verdict', 'simulated', 'taskId', 'runId', 'deployKey',
     'testedHeadSha', 'testedSourceTree', 'mergeSha', 'mergedSourceTree', 'harnessSha',
     'testedUnsignedTreeHash', 'testedManifestSha256', 'buildId', 'unsignedTreeHash',
     'manifestSha256', 'signedPackageSha256', 'deviceId', 'deviceMode', 'installed', 'launched',
     'startedAt', 'completedAt', 'deploymentReportSha256', 'acceptance'];
   const manifest = validateTestedManifest(task.evidence.validate?.package, task.evidence.validate?.testedSha);
-  if (!exactKeys(receipt, fields) || receipt.schemaVersion !== 1 ||
-      receipt.kind !== 'private-device-evidence' || receipt.verdict !== 'PASS' ||
+  if (!['deploy', 'accept'].includes(action) || task.stage !== action || task.intent?.action !== action ||
+      !exactKeys(receipt, fields) || receipt.schemaVersion !== 1 ||
+      receipt.kind !== 'private-device-evidence' ||
+      receipt.verdict !== (action === 'deploy' ? 'PASS' : receipt.acceptance?.verdict) ||
       receipt.simulated !== false || receipt.taskId !== task.id || receipt.runId !== runId ||
       !HASH.test(deployKey ?? '') || receipt.deployKey !== deployKey ||
       receipt.testedHeadSha !== manifest.commit || receipt.mergeSha !== task.evidence.merge?.mergeSha ||
@@ -209,16 +242,43 @@ export function validateDeviceReceipt(receipt, { task, runId, deployKey, now }) 
   const accepted = receipt.acceptance;
   if (!exactKeys(accepted, ['verdict', 'source', 'observedCommit', 'observedBuildId', 'frameCount',
     'stepCount', 'evidenceSha256', 'reportSha256']) ||
-      accepted.verdict !== 'PASS' || accepted.source !== 'physical-camera' ||
-      accepted.observedCommit !== receipt.mergeSha || accepted.observedBuildId !== receipt.buildId ||
-      accepted.frameCount !== ACCEPTANCE_STEPS.length * 2 || accepted.stepCount !== ACCEPTANCE_STEPS.length ||
+      !['PASS', 'FAIL', 'INCONCLUSIVE'].includes(accepted.verdict) || accepted.source !== 'physical-camera' ||
+      !Number.isSafeInteger(accepted.frameCount) || accepted.frameCount < 0 ||
+      accepted.frameCount > ACCEPTANCE_STEPS.length * 2 ||
+      !Number.isSafeInteger(accepted.stepCount) || accepted.stepCount < 0 ||
+      accepted.stepCount > ACCEPTANCE_STEPS.length ||
+      (accepted.verdict === 'PASS'
+        ? accepted.observedCommit !== receipt.mergeSha || accepted.observedBuildId !== receipt.buildId ||
+          accepted.frameCount !== ACCEPTANCE_STEPS.length * 2 || accepted.stepCount !== ACCEPTANCE_STEPS.length
+        : accepted.observedCommit !== null || accepted.observedBuildId !== null) ||
       !HASH.test(accepted.evidenceSha256 ?? '') || !HASH.test(accepted.reportSha256 ?? '')) {
     fail('Private receipt lacks correlated physical acceptance');
   }
-  if (task.evidence.deploy && task.intent?.action !== 'deploy') {
+  if (action === 'accept') {
+    if (!task.evidence.deploy || task.evidence.deploy.key !== deployKey) {
+      fail('Acceptance requires the recorded successful deployment');
+    }
     const { key, recordedAt, ...deployment } = task.evidence.deploy;
-    if (!same(receipt, deployment)) fail('Acceptance must use the exact private deployment receipt');
+    if (!same({ ...receipt, verdict: 'PASS' }, deployment)) fail('Acceptance must use the exact private deployment receipt');
   }
+  return receipt;
+}
+
+/**
+ * Route one deployment receipt through two controller stages without repeating install:
+ * deploy keeps PASS for a verified install; accept uses the nested camera verdict.
+ * This pure conversion is not authentication. Only a concrete bridge receipt retains
+ * in-process provenance; deserialized/test receipts remain ineligible. A future
+ * authenticated transport must preserve this two-stage contract, not rerun deployment
+ * to poll acceptance. Public GitHub transport remains blocked.
+ */
+export function deviceReceiptForStage(deployment, action, context) {
+  if (deployment?.verdict !== 'PASS') fail('Routing requires a successful deployment receipt');
+  const receipt = action === 'deploy' ? deployment : Object.freeze({
+    ...deployment, verdict: deployment.acceptance?.verdict,
+  });
+  validateDeviceReceipt(receipt, { ...context, action });
+  if (isPrivateDeviceReceipt(deployment)) privateReceipts.add(receipt);
   return receipt;
 }
 
@@ -381,27 +441,21 @@ export async function runPrivateDeviceBridge(options) {
     verifyWidgetBytes(await readFile(packagePath), merged, deploy.artifact?.sha256);
     await reauthorize();
     const acceptance = await runDevice({ operation: 'accept', config });
-    const reportSha256 = await saveReport(directory, 'acceptance', acceptance);
-    if (acceptance.status !== 'PASS') return { verdict: acceptance.status, simulated: false,
-      reasonCode: 'PRIVATE_ACCEPTANCE_NOT_PASSED', reportSha256 };
+    await saveReport(directory, 'acceptance', acceptance);
     await reauthorize();
     await verifyPrivateCheckout(context);
     await checkedPath(packagePath);
     verifyWidgetBytes(await readFile(packagePath), merged, deploy.artifact?.sha256);
     const completedAt = Date.now();
-    validatePrivateDeviceReports(deploy, acceptance, expectedBuild, { startedAt, now: completedAt });
+    const outcomes = summarizePrivateDeviceReports(deploy, acceptance, expectedBuild, { startedAt, now: completedAt });
     const receipt = {
-      schemaVersion: 1, kind: 'private-device-evidence', verdict: 'PASS', simulated: false,
+      schemaVersion: 1, kind: 'private-device-evidence', ...outcomes, simulated: false,
       taskId: context.task.id, runId: context.state.runId, deployKey,
       testedHeadSha: tested.commit, ...trees, mergeSha: inputs.head, harnessSha: inputs.harness,
       testedUnsignedTreeHash: tested.treeHash, testedManifestSha256: evidenceDigest(tested),
       buildId: merged.buildId, unsignedTreeHash: merged.treeHash, manifestSha256,
-      signedPackageSha256: deploy.artifact.sha256, deviceId, deviceMode: 'real', installed: true, launched: true,
+      deviceId, deviceMode: 'real', installed: true, launched: true,
       startedAt: new Date(startedAt).toISOString(), completedAt: new Date(completedAt).toISOString(),
-      deploymentReportSha256,
-      acceptance: { verdict: 'PASS', source: 'physical-camera', observedCommit: acceptance.observedBuild.commit,
-        observedBuildId: acceptance.observedBuild.buildId, frameCount: acceptance.evidence.length,
-        stepCount: acceptance.steps.length, evidenceSha256: evidenceDigest(acceptance.evidence), reportSha256 },
     };
     validateDeviceReceipt(receipt, { task: context.task, runId: context.state.runId, deployKey, now: completedAt });
     await saveReport(directory, 'receipt', receipt);
