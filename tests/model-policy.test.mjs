@@ -246,7 +246,19 @@ test('no successful inference result can be fabricated without supported telemet
   assert.throws(() => verifyTelemetry(''), error => ['MISSING_TELEMETRY', 'TELEMETRY_SCHEMA_UNVERIFIED'].includes(error.code));
 });
 
-async function mockProject() {
+test('documented model attribute names alone cannot attest a backend response', () => {
+  const attributes = {
+    'gen_ai.request.model': 'fixture-astra',
+    'gen_ai.response.model': 'fixture-astra',
+    'gen_ai.response.finish_reasons': ['stop']
+  };
+  const resolved = { modelId: 'fixture-astra', effort: 'xhigh', responseModelIds: ['fixture-astra'] };
+  for (const record of [attributes, { attributes }, { resourceSpans: [{ attributes }] }]) {
+    assert.throws(() => verifyTelemetry(`${JSON.stringify(record)}\n`, resolved));
+  }
+});
+
+async function mockProject({ telemetry = null, telemetryKind = 'file' } = {}) {
   const root = path.join(process.cwd(), '.factory', `policy-test-${randomUUID()}`);
   await mkdir(root, { recursive: true, mode: 0o700 });
   const { policy, catalog } = fixtures();
@@ -268,7 +280,7 @@ async function mockProject() {
   const config = ['continueOnAutoMode', 'disableAllHooks', 'ide.autoConnect', 'stayInAutopilot']
     .map(key => `\`${key}\``).join('\n');
   await writeFile(cliPath, `#!${process.execPath}
-import {writeFileSync,readFileSync,existsSync,readdirSync} from 'node:fs';
+import {writeFileSync,readFileSync,existsSync,readdirSync,symlinkSync,linkSync,truncateSync} from 'node:fs';
 import path from 'node:path';
 const args = process.argv.slice(2);
 const topic = args[0] === 'help' ? args[1] : args[0];
@@ -283,6 +295,15 @@ const help = ${JSON.stringify({
   })};
 if (help[topic]) { console.log(help[topic]); }
 else {
+  const telemetry = ${JSON.stringify(telemetry)};
+  const telemetryKind = ${JSON.stringify(telemetryKind)};
+  const telemetryPath = process.env.COPILOT_OTEL_FILE_EXPORTER_PATH;
+  if (telemetryKind === 'symlink') symlinkSync(process.argv[1], telemetryPath);
+  else if (telemetryKind === 'hardlink') linkSync(process.argv[1], telemetryPath);
+  else if (telemetryKind === 'oversized') {
+    writeFileSync(telemetryPath, '');
+    truncateSync(telemetryPath, 16 * 1024 * 1024 + 1);
+  } else if (telemetry !== null) writeFileSync(telemetryPath, Buffer.from(telemetry));
   writeFileSync(${JSON.stringify(path.join(root, 'invocation.json'))}, JSON.stringify({
     args, cwd:process.cwd(), environmentKeys:Object.keys(process.env),
     home:process.env.HOME, config:JSON.parse(readFileSync(path.join(process.env.COPILOT_HOME,'config.json'))),
@@ -326,5 +347,36 @@ test('mocked subprocess demonstrates permission isolation and rejects output wit
     if (previous === undefined) delete process.env.COPILOT_GITHUB_TOKEN;
     else process.env.COPILOT_GITHUB_TOKEN = previous;
     await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('subprocess telemetry input is bounded, UTF-8, and not a linked file', async () => {
+  const previous = process.env.COPILOT_GITHUB_TOKEN;
+  process.env.COPILOT_GITHUB_TOKEN = fixtureToken;
+  try {
+    for (const [input, expected] of [
+      [{ telemetry: [0xc3, 0x28] }, 'INVALID_TELEMETRY'],
+      [{ telemetryKind: 'symlink' }, 'UNSAFE_TELEMETRY'],
+      [{ telemetryKind: 'hardlink' }, 'UNSAFE_TELEMETRY'],
+      [{ telemetryKind: 'oversized' }, 'TELEMETRY_LIMIT']
+    ]) {
+      const fixture = await mockProject(input);
+      try {
+        const options = {
+          cwd: fixture.root, policy: fixture.policy, catalog: fixture.catalog,
+          cliPath: fixture.cliPath, runId: 'unsafe-telemetry', roles: ['implementation']
+        };
+        const { resolution } = await preflight(options);
+        await assert.rejects(invokeRole({
+          ...options, resolution, role: 'implementation', prompt: 'Synthetic telemetry input test.'
+        }), code(expected));
+        assert.deepEqual(await readdir(path.join(fixture.root, '.factory', 'isolated')), []);
+      } finally {
+        await rm(fixture.root, { recursive: true, force: true });
+      }
+    }
+  } finally {
+    if (previous === undefined) delete process.env.COPILOT_GITHUB_TOKEN;
+    else process.env.COPILOT_GITHUB_TOKEN = previous;
   }
 });

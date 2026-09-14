@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { deflateRawSync } from 'node:zlib';
 import { GitHubAPI, GitHubContentsLedger, GitHubError, extractResult } from '../factory/github-api.mjs';
@@ -210,9 +211,15 @@ function dispatchFixture(stage = 'plan') {
   state.activeTaskId = task.id;
   const candidate = 'b'.repeat(40);
   task.evidence.implement = { headSha: candidate, baseSha: sha };
-  task.evidence.pr = { prNumber: 42, headSha: candidate };
-  task.evidence.validate = { verdict: 'PASS', testedSha: candidate };
-  task.evidence.merge = { merged: true, mergeSha: sha };
+  task.evidence.pr = { prNumber: 42, headSha: candidate, publishKey: 'publish-key' };
+  const files = [{ path: 'app/build.json', size: 1, sha256: 'd'.repeat(64) }];
+  const treeHash = createHash('sha256').update(files.map(file => `${file.path}\0${file.sha256}\n`).join('')).digest('hex');
+  const manifest = { schemaVersion: 1, version: '1.0.0', commit: candidate, buildId: candidate,
+    mode: 'production', appId: 'TzOneDrive.PhotoViewer', packageId: 'TzOneDrive', treeHash, files };
+  task.evidence.validate = { verdict: 'PASS', headSha: candidate, testedSha: candidate, ciPassed: true,
+    independentReview: { verdict: 'PASS', independent: true, reviewer: 'synthetic-review-fixture' },
+    package: { headSha: candidate, buildId: candidate, sha256: treeHash, manifest } };
+  task.evidence.merge = { merged: true, headSha: candidate, mergeSha: sha };
   const inputs = {
     task: task.id, stage, key: wireKey(task.intent.key),
     head: ['validate', 'repair'].includes(stage) ? candidate : sha, base: sha, harness: sha
@@ -226,8 +233,10 @@ function dispatchFixture(stage = 'plan') {
     FACTORY_ENABLED: 'true', FACTORY_STOP: 'false', FACTORY_APP_ID: String(config.appId),
     ...Object.fromEntries(Object.entries(inputs).map(([key, value]) => [`FACTORY_${key.toUpperCase()}`, value]))
   };
-  const pr = { number: 42, merged: true, merge_commit_sha: sha,
-    head: { sha: candidate }, user: { login: config.appBotLogin } };
+  const pr = { number: 42, merged: true, merge_commit_sha: sha, body: marker(task.id, 'publish-key'),
+    head: { sha: candidate, repo: { full_name: config.repository } },
+    base: { ref: 'master' }, user: { login: config.appBotLogin } };
+  const sourceTrees = { tested: 'e'.repeat(40), merged: 'e'.repeat(40) };
   const writes = [];
   const api = { request: async (method, path, body) => {
     if (method !== 'GET') {
@@ -241,13 +250,15 @@ function dispatchFixture(stage = 'plan') {
     if (path === `/contents/factory/trusted-config.json?ref=${sha}`) return jsonFile(configured);
     if (path === '/contents/ledger.json?ref=factory-ledger') return { ...jsonFile(state), sha: 'ledger-version' };
     if (path === '/pulls/42') return pr;
+    if (path === `/git/commits/${candidate}`) return { tree: { sha: sourceTrees.tested } };
+    if (path === `/git/commits/${sha}`) return { tree: { sha: sourceTrees.merged } };
     if (path === `/contents/factory/model-policy.json?ref=${sha}`) {
       return jsonFile(JSON.parse(await readFile(new URL('../factory/model-policy.json', import.meta.url))));
     }
     if (path === `/contents/factory/model-catalog.json?ref=${sha}`) throw new GitHubError(404, 'Missing catalog');
     throw new Error(`Unexpected test API read: ${path}`);
   } };
-  return { api, inputs, env, configured, state, task, pr, writes, workflow };
+  return { api, inputs, env, configured, state, task, pr, writes, workflow, sourceTrees };
 }
 
 test('all dispatched stages require exact inputs, App identity and the durable intent', async () => {
@@ -455,16 +466,37 @@ test('device authorization rejects unmerged, unreviewed or unrelated physical ha
   for (const mutate of [
     ({ task }) => { task.evidence.merge.merged = false; },
     ({ task }) => { task.evidence.validate.verdict = 'FAIL'; },
+    ({ task }) => { task.evidence.validate.ciPassed = false; },
+    ({ task }) => { task.evidence.validate.independentReview.independent = false; },
+    ({ task }) => { task.evidence.validate.package.manifest.commit = 'c'.repeat(40); },
+    ({ task }) => { task.evidence.merge.headSha = 'c'.repeat(40); },
+    ({ sourceTrees }) => { sourceTrees.merged = 'f'.repeat(40); },
     ({ pr }) => { pr.merged = false; },
     ({ pr }) => { pr.number = 1; },
     ({ pr }) => { pr.merge_commit_sha = 'c'.repeat(40); },
     ({ pr }) => { pr.head.sha = 'c'.repeat(40); },
     ({ pr }) => { pr.user.login = 'other'; },
+    ({ pr }) => { pr.body = 'No factory marker'; },
+    ({ pr }) => { pr.head.repo.full_name = 'other/repo'; },
     ({ inputs }) => { inputs.base = 'c'.repeat(40); }
   ]) {
     const fixture = dispatchFixture('deploy');
     mutate(fixture);
     await assert.rejects(authorizeDispatch(fixture.api, fixture.inputs, fixture.env));
+  }
+});
+
+test('public deployment artifacts and embedded acceptance cannot supply private transport authentication', async () => {
+  const { api, env, task } = dispatchFixture('deploy');
+  const adapter = await createAdapter({ api, env });
+  adapter.pollRun = async () => ({ status: 'completed', result: {
+    receipt: { verdict: 'PASS', simulated: false, gateEligible: true, rawCamera: '/private/frame.png' },
+  } });
+  const context = { idempotencyKey: 'synthetic-key', now: Date.now(), evidence: task.evidence,
+    previousReceipt: { ticket: { head: sha } } };
+  for (const action of ['deploy', 'accept']) {
+    const result = await adapter.execute(action, task, context);
+    assert.deepEqual(result, { verdict: 'INCONCLUSIVE', simulated: false, reasonCode: 'PRIVATE_DEVICE_TRANSPORT_REQUIRED' });
   }
 });
 

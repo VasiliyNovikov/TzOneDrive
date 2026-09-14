@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isPrivateDeviceReceipt, validateDeviceReceipt, validateTestedManifest } from './device-bridge.mjs';
 
 export const DEFAULT_LIMITS = Object.freeze({
   experimentMs: 24 * 60 * 60 * 1000,
@@ -214,7 +215,7 @@ function wait(task, now, count, limits, requestedAt) {
   task.updatedAt = now;
 }
 
-function validationGate(task) {
+export function validationGate(task, mode = 'mock') {
   const evidence = task.evidence.validate;
   const headSha = task.evidence.pr?.headSha;
   if (!SHA.test(headSha ?? '') || task.evidence.implement?.headSha !== headSha ||
@@ -228,6 +229,10 @@ function validationGate(task) {
   const artifact = evidence.package;
   if (!artifact?.buildId || !HASH.test(artifact.sha256 ?? '') || artifact.headSha !== headSha) {
     return 'uncorrelated-tested-package';
+  }
+  if (mode === 'real') {
+    try { validateTestedManifest(artifact, headSha); }
+    catch { return 'uncorrelated-tested-unsigned-manifest'; }
   }
   return null;
 }
@@ -312,7 +317,7 @@ function applyReceipt(state, task, action, receipt, now) {
       else transition(task, 'validate', now);
       break;
     case 'validate':
-      problem = validationGate(task);
+      problem = validationGate(task, state.mode);
       if (!problem) transition(task, 'merge', now);
       break;
     case 'repair':
@@ -326,17 +331,17 @@ function applyReceipt(state, task, action, receipt, now) {
       }
       break;
     case 'merge':
-      problem = validationGate(task);
+      problem = validationGate(task, state.mode);
       if (!problem && (receipt.merged !== true || receipt.headSha !== task.evidence.validate.testedSha ||
           !SHA.test(receipt.mergeSha ?? ''))) problem = 'merge-not-exact-tested-head';
       if (!problem) transition(task, 'deploy', now);
       break;
     case 'deploy':
-      problem = deploymentGate(task, receipt, state.mode);
+      problem = state.mode === 'real' ? null : deploymentGate(task, receipt, state.mode);
       if (!problem) transition(task, 'accept', now);
       break;
     case 'accept':
-      problem = acceptanceGate(task, receipt, state.mode);
+      problem = state.mode === 'real' ? null : acceptanceGate(task, receipt, state.mode);
       if (!problem) {
         task.status = 'delivered';
         task.delivery = state.simulated ? 'SIMULATED' : 'PHYSICAL';
@@ -405,7 +410,7 @@ export async function advance(input, adapter, { now = Date.now(), persist = asyn
   }
   const action = task.stage;
   if (action === 'merge') {
-    const problem = validationGate(task);
+    const problem = validationGate(task, state.mode);
     if (problem) {
       block(task, problem, now);
       settle(state, now);
@@ -504,6 +509,26 @@ export async function advance(input, adapter, { now = Date.now(), persist = asyn
   } else if (!['PASS', 'FAIL', 'INCONCLUSIVE'].includes(result.verdict)) {
     block(task, 'invalid-verdict', now);
   } else {
+    if (state.mode === 'real' && ['deploy', 'accept'].includes(action)) {
+      if (result.verdict === 'PASS') {
+        try {
+          if (!isPrivateDeviceReceipt(result) || validationGate(task, 'real')) {
+            throw new Error('Concrete private execution and independent validation are required');
+          }
+          validateDeviceReceipt(result, {
+            task, runId: state.runId, deployKey: action === 'deploy' ? intent.key : task.evidence.deploy?.deployKey,
+            now: Math.max(now, Date.now()),
+          });
+        } catch {
+          // Rejected private payloads must never be copied into the public ledger/history.
+          block(task, 'invalid-private-device-receipt', now);
+          settle(state, now);
+          return save();
+        }
+      } else {
+        result = { verdict: result.verdict, simulated: false, reasonCode: 'PRIVATE_DEVICE_NOT_ACCEPTED' };
+      }
+    }
     const receipt = { ...clone(result), key: intent.key, recordedAt: now };
     task.evidence[action] = receipt;
     task.history.push({ type: 'receipt', action, key: intent.key, at: now, receipt: clone(receipt) });

@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { constants } from 'node:fs';
 import {
-  chmod, lstat, mkdir, readFile, realpath, rm, stat, writeFile
+  chmod, lstat, mkdir, open, readFile, realpath, rm, stat, writeFile
 } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -325,6 +326,35 @@ async function copyAttachments(files, root, workdir) {
   return copied;
 }
 
+async function readTelemetry(file) {
+  let handle;
+  try {
+    handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const info = await handle.stat();
+    requirePolicy(info.isFile() && info.nlink === 1, 'UNSAFE_TELEMETRY', 'Telemetry must be a private regular file');
+    requirePolicy(info.size <= MAX_OUTPUT, 'TELEMETRY_LIMIT', 'Telemetry exceeded the safety limit');
+    const buffer = Buffer.alloc(MAX_OUTPUT + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, null);
+      if (!bytesRead) break;
+      length += bytesRead;
+    }
+    requirePolicy(length <= MAX_OUTPUT, 'TELEMETRY_LIMIT', 'Telemetry exceeded the safety limit');
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, length));
+    } catch {
+      throw new PolicyError('INVALID_TELEMETRY', 'Telemetry must be valid UTF-8');
+    }
+  } catch (error) {
+    if (error.code === 'ENOENT') throw new PolicyError('MISSING_TELEMETRY', 'No model-response telemetry; inference output is rejected');
+    if (error.code === 'ELOOP') throw new PolicyError('UNSAFE_TELEMETRY', 'Telemetry must not be a symlink');
+    throw error;
+  } finally {
+    await handle?.close();
+  }
+}
+
 export async function invokeRole(options) {
   const { root, policy, catalog } = await inputs(options);
   const resolution = assertPinnedResolution(options.resolution, policy, catalog);
@@ -354,13 +384,7 @@ export async function invokeRole(options) {
     const result = await execute(inspection.cli.path, args, {
       cwd: workspace.workdir, env, timeoutMs: options.timeoutMs ?? 600000
     });
-    let rawTelemetry;
-    try {
-      rawTelemetry = await readFile(telemetryPath, 'utf8');
-    } catch (error) {
-      if (error.code === 'ENOENT') throw new PolicyError('MISSING_TELEMETRY', 'No model-response telemetry; inference output is rejected');
-      throw error;
-    }
+    const rawTelemetry = await readTelemetry(telemetryPath);
     const telemetry = verifyTelemetry(rawTelemetry, resolved, { stderr: result.stderr });
     assertPinnedResolution(resolution, policy, catalog);
     requirePolicy(result.stdout.trim().length > 0, 'EMPTY_RESPONSE', 'CLI returned no response');

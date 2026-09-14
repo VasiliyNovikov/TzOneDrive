@@ -337,7 +337,7 @@ export async function authorizeDispatch(api, inputs, env = process.env) {
       env.GITHUB_TRIGGERING_ACTOR !== config.appBotLogin ||
       String(config.appId) !== env.FACTORY_APP_ID) throw new Error('Dispatch is stopped or not authorized by the installed App');
   const { state } = await new GitHubContentsLedger(api).read();
-  const { assertState } = await import('./controller.mjs');
+  const { assertState, validationGate } = await import('./controller.mjs');
   assertState(state);
   const task = state?.tasks?.find(item => item.id === inputs.task);
   if (state?.mode !== 'real' || state.simulated !== false || state.activeTaskId !== inputs.task ||
@@ -360,12 +360,21 @@ export async function authorizeDispatch(api, inputs, env = process.env) {
   if (inputs.stage === 'deploy') {
     if (task.evidence.merge?.merged !== true || inputs.head !== task.evidence.merge.mergeSha ||
         inputs.base !== inputs.head || current.sha !== inputs.head ||
-        task.evidence.validate?.verdict !== 'PASS') throw new Error('Only the validated merged default commit can reach the LAN');
+        validationGate(task, 'real') || task.evidence.merge.headSha !== task.evidence.validate.testedSha) {
+      throw new Error('Only the independently validated merged default commit can reach the LAN');
+    }
     const pr = await api.request('GET', `/pulls/${task.evidence.pr.prNumber}`);
-    if (pr.number <= 1 || pr.merged !== true || pr.merge_commit_sha !== inputs.head ||
-        pr.head.sha !== task.evidence.validate.testedSha || pr.user?.login !== config.appBotLogin) {
+    if (pr.number !== task.evidence.pr.prNumber || pr.number <= 1 || pr.merged !== true || pr.merge_commit_sha !== inputs.head ||
+        pr.head.sha !== task.evidence.validate.testedSha || pr.user?.login !== config.appBotLogin ||
+        pr.head.repo?.full_name !== REPOSITORY || pr.base?.ref !== current.branch ||
+        !pr.body?.includes(marker(task.id, task.evidence.pr.publishKey))) {
       throw new Error('Merged PR provenance mismatch');
     }
+    const commits = await Promise.all([task.evidence.validate.testedSha, inputs.head]
+      .map(sha => api.request('GET', `/git/commits/${sha}`)));
+    const sourceTrees = commits.map(commit => assertSha(commit.tree?.sha));
+    if (sourceTrees[0] !== sourceTrees[1]) throw new Error('Tested and merged source trees differ');
+    return { ...inputs, task, state, config, sourceTrees };
   } else if (!['plan', 'implement', 'repair', 'validate'].includes(inputs.stage)) {
     throw new Error('Unsupported dispatch stage');
   }
@@ -391,9 +400,7 @@ export async function createAdapter(options = {}) {
       return pass({ merged: true, headSha: context.evidence.validate.testedSha, mergeSha: result.sha });
     }
     if (action === 'accept') {
-      const receipt = context.evidence.deploy;
-      if (!receipt.acceptance) return { verdict: 'INCONCLUSIVE', simulated: false, reason: 'No correlated physical acceptance' };
-      return { ...receipt.acceptance, simulated: false };
+      return { verdict: 'INCONCLUSIVE', simulated: false, reasonCode: 'PRIVATE_DEVICE_TRANSPORT_REQUIRED' };
     }
     const trusted = await adapter.trustedContext();
     if (!isEnabled(trusted.config, adapter.env)) throw new Error('Factory stopped');
@@ -428,7 +435,9 @@ export async function createAdapter(options = {}) {
       if (typeof result.plan !== 'string' || !result.plan.trim() || result.plan.length > 16000) throw new Error('Invalid planning output');
       return pass({ plan: result.plan, baseSha: ticket.base });
     }
-    if (action === 'deploy') return { ...result.receipt, simulated: false };
+    // Public workflow artifacts are not an authenticated private evidence transport.
+    if (action === 'deploy') return { verdict: 'INCONCLUSIVE', simulated: false,
+      reasonCode: 'PRIVATE_DEVICE_TRANSPORT_REQUIRED' };
     throw new Error('Unsupported production action');
   };
   return adapter;

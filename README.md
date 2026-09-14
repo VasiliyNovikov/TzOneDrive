@@ -9,9 +9,10 @@ for browser development and the mock lifecycle.
 **Real delivery is deliberately disabled until bootstrap.** A mock PASS is
 not a physical-TV PASS. No physical TV, camera, signing certificate, Copilot
 inference entitlement or live model availability was available during
-scaffolding. Production telemetry parsing and the private device-workflow
-bridge still require implementation, not just configuration. This scaffold
-must be reviewed and merged by the owner, not this factory.
+scaffolding. Production inference verification and authenticated private device
+transport remain blocked; the local evidence bridge alone is not readiness.
+These gates require verified evidence and infrastructure, not just configuration.
+This scaffold must be reviewed and merged by the owner, not this factory.
 The actual default branch was inspected: `master`. The closed, empty earlier
 scaffold PR #1 is not reused.
 
@@ -59,7 +60,7 @@ Do not publish a signed package or camera images merely because a test passed.
 | `factory/controller.mjs`, `store.mjs` | Deterministic transitions, intent/receipt persistence, attempts, dependencies and recovery |
 | `factory/model-policy.*`, `cli.mjs` | Central role policy and actual non-interactive Copilot CLI invocation |
 | `factory/github-*.mjs`, `worker.mjs` | Scoped repository operations, explicit workflow handoffs and independent cloud stages |
-| `factory/device.mjs`, `acceptance.mjs`, `adapters/` | Signed deployment, bounded remote/camera steps and strict acceptance evidence |
+| `factory/device.mjs`, `device-bridge.mjs`, `acceptance.mjs`, `adapters/` | Signed deployment, private provenance receipts, bounded remote/camera steps and strict acceptance evidence |
 | `.github/workflows/` | Secretless CI and opt-in, authorized factory orchestration |
 
 The control plane is deterministic code, **not an agent deciding whether to
@@ -162,9 +163,10 @@ authenticated availability or modality for a particular model.
 The central policy fails closed until a validated catalog/resolution meets
 the required role, effort and modality. Every invocation pins its selection.
 The wrapper isolates configuration and disables alternate providers,
-unapproved overrides, native agent delegation and automatic fallback. A model
-reporting a different identity, missing required telemetry, or failed inference
-does not produce valid review or acceptance evidence.
+unapproved overrides and native agent delegation. A requested model setting
+alone does not guarantee that the CLI never falls back. Unapproved response
+identities, missing required telemetry and failed inference must not produce
+valid review or acceptance evidence.
 
 **Configured is not verified.** Preserve CLI version, requested policy,
 catalog evidence, selected ID/effort and any exposed response telemetry
@@ -174,11 +176,26 @@ No real inference was performed during scaffolding.
 The response-telemetry parser is also an explicit implementation gate:
 `verifyTelemetry()` currently rejects every inference result with
 `TELEMETRY_SCHEMA_UNVERIFIED`. Populating a catalog or enabling a repository
-variable does not remove that gate. A separate owner-reviewed change must
-implement and regression-test the actual supported exporter schema using
-validated, sanitized evidence before real results can be accepted. Never
-replace this with an assumption that the requested model was the responding
-model.
+variable does not remove that gate. Telemetry loading now rejects oversized,
+non-UTF-8 and linked files, but safe input loading is not model verification.
+
+Exact-version static inspection verified the Linux npm archive's integrity
+(SHA-256 `23906ffd14c5e29fc1325138fba7d8ea1a397e02ffdcd36383fe66e4d196ba46`).
+Its native `runtime.node` is stripped; pooled strings include
+`FileSpanExporter`, `gen_ai.response.model`, and
+`gen_ai.request.reasoning.level`, but do not establish their JSON structure,
+types or value provenance. The documented JSON-lines exporter must not be
+assumed to use OTLP JSON. The documentation calls the response model
+“Resolved model”; neither that wording nor a matching requested/response
+string proves that the value came from the backend rather than a fallback.
+No authenticated telemetry capture or real inference was obtained.
+
+Before implementing acceptance, obtain a supported exact-version exporter
+contract and verified response-model setter semantics, then regression-test
+sanitized evidence. Account for every provider dispatch, including failed or
+partial calls, and cumulative histogram snapshots without double-counting.
+Requested reasoning levels remain distinct from unavailable backend-effort
+verification. Never substitute the requested model for an observed response.
 
 ### Refresh and controlled upgrades
 
@@ -246,10 +263,58 @@ quotas or usage limits; bounded backoff and experiment deadlines still apply.
 
 The device workflow is intentionally not a production deployment path. Before
 replacing its stub, implement independently enforced private runner admission,
-per-device serialization, private evidence retention, and the receipt bridge
-binding tested source, merged source, unsigned manifest hash, signed widget
-hash and camera acceptance. These hashes are different identities and must
-not be substituted for each other. No repository variable bypasses this work.
+and authenticated private receipt transport. The local bridge implements
+per-device serialization, private evidence retention, and bindings between
+tested source, merged source, unsigned manifest hash, signed widget hash and
+camera acceptance. These hashes are different identities and must not be
+substituted for each other. No repository variable supplies the missing
+admission or transport.
+
+### Private device bridge contract
+
+`factory/device-bridge.mjs` exports `runPrivateDeviceBridge` for a future,
+independently admitted private deployment process. It is **not** an HTTP service,
+a public workflow runner, or an implemented receipt transport. The public
+GitHub adapter rejects deployment artifacts as physical acceptance evidence.
+The factory remains disabled.
+
+The entry point accepts only the six authorized dispatch `inputs` and an
+absolute operator-owned `configPath`. It rechecks the App dispatch, current
+default branch, durable deployment intent, independently tested manifest and
+merged PR/tree through a read-only repository credential (`FACTORY_READ_TOKEN`).
+The calling infrastructure must independently authenticate the dispatch
+environment; environment strings are not proof of runner admission.
+
+On Linux, the checked-out harness must exactly match the authorized default
+commit, with tested and merged commits available locally. Untracked harness
+inputs, symlinks, changed files and group/world-writable inputs are rejected.
+Only the trusted build implementation runs: candidate package scripts do not.
+The bridge rebuilds the tested assets, compares their manifest, rebuilds with
+the merged SHA, invokes concrete device adapters, and verifies the signed WGT
+payload against the merged unsigned manifest. XML-signature trust remains the
+Samsung SDK's responsibility.
+
+Prepare private operator configuration from the device example, but omit
+`expectedBuild`, `projectRoot`, `appDir`, `manifestPath`, `packageName` and
+`mock`: the bridge owns build identity and paths and accepts only real adapters.
+Use absolute SDK/remote/decoder paths, the physical device serial, signing
+profile, reviewed visual configuration and explicit camera-inference consent.
+The configuration file and its parent directory must be owned by the host
+user with no group/other permissions. Do not commit either.
+
+The bridge creates `device-bridge-private/` beside that configuration, with
+a lock keyed to the device and exclusive per-intent directories. Configure one
+canonical private directory and serial for each physical device; multiple
+hosts/configuration roots require external serialization. Reused intent
+directories and crash-surviving locks block replay: investigate and reconcile
+the installed build rather than deleting them to retry.
+
+Raw frames, reports and manifests remain private; filenames bind reports to
+their hashes. The returned receipt contains bounded identities, hashes and
+verdicts, not frames or diagnostics. Its schema validator checks correlation,
+**not producer authentication**. Select and review an authenticated private
+transport before connecting receipts to the controller. No local synthetic
+receipt test constitutes physical acceptance.
 
 Configure credentials only after reviewing the default-branch harness:
 
@@ -268,8 +333,8 @@ package scripts or inference. Only bounded structured receipts are uploaded,
 with short retention; raw camera and inference logs are not public artifacts.
 Keep goals and fixtures synthetic while those receipts are public.
 
-Leave production activation off until the telemetry parser, private device
-bridge and all physical/model bootstrap gates are complete. A dispatched
+Leave production activation off until telemetry verification, private admission
+and transport, and all physical/model bootstrap gates are complete. A dispatched
 workflow finishing is not proof of delivery; inspect the correlated receipt
 and durable controller status. Stop scheduled intake, set `FACTORY_STOP=true`
 and cancel in-flight runs for an emergency stop; already-dispatched jobs are
@@ -302,6 +367,8 @@ camera acceptance → deliberately broken build rejected**
    CLI, and a camera capture tool such as FFmpeg. Check the SDK release's
    supported Linux distributions rather than assuming every Ubuntu version
    works. Configure absolute executable paths and run the diagnostics command.
+   Keep the reviewed harness separate from candidate checkouts; never execute
+   candidate package scripts on the signing/LAN host.
 3. **TV network.** Turn the TV on. Enable TV Developer Mode, set the development
    host IP and perform the documented restart. Check direct network
    connectivity from the dedicated runner. Use an explicit target TV/serial.
@@ -328,10 +395,15 @@ camera acceptance → deliberately broken build rejected**
    separately approved visual model. Retain package/build/task/test
    correlation. Missing, stale, obscured or unreadable frames, unavailable
    inference, invalid JSON, disconnects and timeouts must not pass.
-9. **Negative control.** Deliberately break directional navigation in a
-   synthetic diagnostic build. Deploy it through the same harness and verify
-   a non-PASS verdict. Restore the good build. Mock negative tests do not
-   replace this physical experiment.
+9. **Positive and negative controls.** First retain a real **PASS** for the
+   working synthetic build. Deliberately break directional navigation in a
+   separately identified synthetic build without changing the trusted harness
+   or criteria. Deploy it through the same path and require a real **FAIL**
+   for the broken navigation, with fresh evidence identifying that build.
+   **INCONCLUSIVE is not a successful negative control**: missing evidence or
+   an unavailable model does not demonstrate defect detection. Restore the
+   good build and confirm PASS again. Retain each source/build/package identity,
+   model audit and private report. Mock tests do not replace this experiment.
 10. **Enable unattended operation.** Only after model validation, App/settings
     verification, runner restrictions, camera privacy checks, real positive
     and negative controls, enable the bounded factory experiment. Configure
@@ -372,6 +444,7 @@ labels.
 | Copilot execution | Pinned CLI wrapper, explicit role policy | Model/fallback/override failure cases | Authenticated flagship availability, effort, telemetry and visual approval |
 | Independent review and merge | Separate control/worker paths and commit gates | Correlation and fail-closed checks | Live repository protections, App identity and permissions |
 | Signed TV installation | SDK/SDB process adapters | Bounded fake device operations | SDK/profile/device permission and actual hardware |
+| Private deployment provenance | Local bridge, tested/merged/unsigned/signed identities, exclusive evidence and device locks | Manifest/widget/report rejection and correlation tests | Independently enforced host admission, authenticated receipt transport and physical controls |
 | Camera acceptance | Fresh-frame/structured-verdict harness | PASS, FAIL, INCONCLUSIVE scenarios | Real camera, build detector, paired remote and model validation |
 | OneDrive authentication/Graph | Provider boundary only | No personal data | Future personal-account delegated read-only implementation |
 | Azure, emulator, unattended power-on | Not implemented or required | None | Optional future maintenance work |
@@ -424,6 +497,9 @@ unverified prerequisites.
 
 * [Copilot CLI documentation](https://docs.github.com/en/copilot/how-tos/copilot-cli)
   and [official releases](https://github.com/github/copilot-cli/releases).
+* [Contemporaneous CLI telemetry reference](https://github.com/github/docs/blob/a4e23419965182fe7ee23cb207df26087c0279a3/content/copilot/reference/copilot-cli-reference/cli-command-reference.md#opentelemetry-monitoring)
+  and [pinned Linux package metadata](https://registry.npmjs.org/@github/copilot-linux-x64/1.0.83);
+  neither documentation nor package string tables establish backend identity.
 * [Workflow trigger restrictions](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow).
 * [GitHub App installation tokens](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation).
 * [Samsung TV developer documentation](https://developer.samsung.com/smarttv/develop)

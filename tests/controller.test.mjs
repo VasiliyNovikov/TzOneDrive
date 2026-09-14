@@ -182,7 +182,7 @@ test('mock receipts cannot advance a real run or become physical delivery', asyn
   await assert.rejects(runLoop(initial({}, 'real'), {}, { virtualTime: true }), /only permitted for mock/);
 });
 
-test('real delivery requires matching real device and physical camera evidence', async (t) => {
+test('legacy mock receipts cannot be relabelled into real delivery, even with physical-looking fields', async (t) => {
   for (const mode of ['real', 'emulator', 'mock', 'missing-camera', 'wrong-device', 'wrong-build']) {
     await t.test(mode, async () => {
       const mock = await createMockAdapter();
@@ -201,8 +201,8 @@ test('real delivery requires matching real device and physical camera evidence',
         }
         return receipt;
       } });
-      assert.equal(state.status, mode === 'real' ? 'delivered' : 'blocked');
-      if (mode === 'real') assert.equal(state.tasks[0].delivery, 'PHYSICAL');
+      assert.equal(state.status, 'blocked');
+      assert.equal(state.tasks[0].delivery, undefined);
     });
   }
 });
