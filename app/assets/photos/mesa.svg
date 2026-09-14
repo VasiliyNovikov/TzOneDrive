@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000">
+  <defs><linearGradient id="s" x2="0" y2="1"><stop stop-color="#cac4b6"/><stop offset="1" stop-color="#f0d8b4"/></linearGradient><linearGradient id="d" x2="0" y2="1"><stop stop-color="#c9865d"/><stop offset="1" stop-color="#e6bc8b"/></linearGradient></defs>
+  <path fill="url(#s)" d="M0 0h1600v1000H0z"/><circle cx="1184" cy="224" r="95" fill="#f9e9bf"/>
+  <path fill="#c1957a" d="m0 603 285-2 70-218h155l89 217 381 66 75-211h260l118 218 167-38v365H0Z"/>
+  <path fill="url(#d)" d="M0 678q677-63 1600 60v262H0Z"/>
+  <path fill="#ae6249" d="m176 745 129-423h230l62 417Z"/><path fill="#cc8660" d="m305 322 13 370 141-33 76-337Z"/>
+  <path d="M280 437h261M249 540h309M218 647h355" stroke="#e5a475" stroke-width="10" opacity=".45"/>
+  <path fill="#884d3e" d="m883 822 98-348h132l167 348Z"/><path fill="#c17b55" d="m981 474 15 281 117-35V474Z"/>
+  <path fill="#d39d71" d="M0 941q632-200 1010-63t590 6v116H0Z"/><path d="M421 1000q34-114 254-100t103-79" fill="none" stroke="#f1c797" stroke-width="12"/>
+</svg>

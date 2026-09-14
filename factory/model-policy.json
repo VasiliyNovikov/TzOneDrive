@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "validationStatus": "unvalidated",
+  "cli": {
+    "package": "@github/copilot",
+    "version": "1.0.83"
+  },
+  "maxCatalogAgeSeconds": 86400,
+  "maxRunAgeSeconds": 3600,
+  "requireBackendEffort": false,
+  "roles": {
+    "planning": {
+      "desiredDisplayName": "GPT-6 Astra",
+      "modelId": null,
+      "effort": "highest-supported",
+      "flagship": true
+    },
+    "implementation": {
+      "desiredDisplayName": "GPT-6 Astra",
+      "modelId": null,
+      "effort": "highest-supported",
+      "flagship": true
+    },
+    "repair": {
+      "desiredDisplayName": "GPT-6 Astra",
+      "modelId": null,
+      "effort": "highest-supported",
+      "flagship": true
+    },
+    "review": {
+      "desiredDisplayName": "Claude Opus 5",
+      "modelId": "claude-opus-5",
+      "effort": "highest-supported",
+      "flagship": true
+    },
+    "visual": null
+  },
+  "interfaceEvidence": {
+    "source": "@github/copilot@1.0.83: --version, --help, help config, help environment, help monitoring",
+    "reviewModelId": "help config lists claude-opus-5; this is not authenticated availability evidence",
+    "planningModelId": "GPT-6 Astra has no verified exact ID in the inspected help; authenticated owner-reviewed evidence is required",
+    "reasoning": "Highest supported effort must come from the reviewed authenticated catalog, not the CLI-wide effort choices. Backend reasoning effort is unavailable unless separately exposed and verified.",
+    "sources": [
+      "https://docs.github.com/en/copilot/reference/cli-command-reference",
+      "https://docs.github.com/en/copilot/how-tos/copilot-cli/administer-copilot-cli/monitor-with-opentelemetry"
+    ]
+  }
+}

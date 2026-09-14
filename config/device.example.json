@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "mode": "mock",
+  "expectedBuild": {
+    "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "buildId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "appDir": "dist/app",
+  "manifestPath": "dist/manifest.json",
+  "packageName": "TzOneDrive.wgt",
+  "signingProfile": "REPLACE_WITH_LOCAL_SAMSUNG_CERTIFICATE_PROFILE",
+  "executables": {
+    "sdb": "sdb",
+    "tizen": "tizen",
+    "ffmpeg": "ffmpeg",
+    "remote": "/opt/tzonedrive-operator/bin/remote-bridge",
+    "buildDetector": "/opt/tzonedrive-operator/bin/camera-build-decoder"
+  },
+  "device": {
+    "host": "192.0.2.10",
+    "port": 26101,
+    "serial": "192.0.2.10:26101"
+  },
+  "camera": {
+    "device": "/dev/video0",
+    "width": 1920,
+    "height": 1080,
+    "crop": { "x": 0, "y": 0, "width": 1920, "height": 1080 },
+    "outputDir": ".factory/local-camera",
+    "maxFrameBytes": 8388608,
+    "maxFrameAgeMs": 10000
+  },
+  "remote": {
+    "bootstrapConfirmed": false
+  },
+  "visual": {
+    "cliPath": "/opt/tzonedrive-operator/bin/copilot",
+    "policyPath": "/opt/tzonedrive-operator/visual-policy.json",
+    "catalogPath": "/opt/tzonedrive-operator/model-catalog.json"
+  },
+  "privacy": {
+    "allowCameraInference": false
+  },
+  "timeouts": {
+    "operationMs": 15000,
+    "inferenceMs": 60000,
+    "totalMs": 240000,
+    "settleMs": 300
+  },
+  "mock": {
+    "scenario": "pass"
+  }
+}

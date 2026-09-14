@@ -1,0 +1,10 @@
+{
+  "name": "TzOneDrive browser development",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:1-22-bookworm",
+  "forwardPorts": [4173],
+  "portsAttributes": {
+    "4173": { "label": "Synthetic TV viewer", "onAutoForward": "notify", "visibility": "private" }
+  },
+  "postCreateCommand": "npm ci --ignore-scripts && npx playwright install --with-deps chromium",
+  "remoteEnv": { "HOST": "0.0.0.0" }
+}

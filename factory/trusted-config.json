@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "repository": "VasiliyNovikov/TzOneDrive",
+  "owner": "VasiliyNovikov",
+  "enabled": false,
+  "stop": true,
+  "ledgerBranch": "factory-ledger",
+  "appBotLogin": null,
+  "appId": null,
+  "workflows": {
+    "worker": "factory-worker.yml",
+    "device": "factory-device.yml"
+  },
+  "limits": {
+    "maxFiles": 20,
+    "maxFileBytes": 65536,
+    "maxTotalBytes": 262144
+  },
+  "backlog": [
+    {
+      "id": "fixture-tv-navigation",
+      "goal": "Improve the fixture-backed TV interface within app/ only. Preserve safe DOM rendering, remote-control navigation, explicit unsupported account messaging, and trusted tests. Do not introduce live authentication, secrets, dependencies or external services."
+    }
+  ]
+}
