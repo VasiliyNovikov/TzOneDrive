@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "status": "draft-unvalidated-owner-attestation",
+  "cli": {
+    "package": "@github/copilot",
+    "version": "1.0.83"
+  },
+  "capturedAt": "2026-09-14T22:04:44Z",
+  "expiresAt": "2026-09-14T22:04:44Z",
+  "review": {
+    "approved": false,
+    "reviewer": "VasiliyNovikov",
+    "reviewedAt": "2026-09-14T22:04:44Z",
+    "method": "owner-attestation-pending-authenticated-cli-evidence",
+    "notes": "Owner-reported model selections and credential fingerprint only. This draft is intentionally unvalidated and must not authorize inference.",
+    "evidence": []
+  },
+  "authentication": {
+    "type": "fine-grained-pat",
+    "account": "VasiliyNovikov",
+    "repositoryAccess": "none",
+    "tokenSha256": "d23b3c894755a5114ecea82ade9850714fd752b6e372b1bf81a6380a0cc6b1c7",
+    "permissions": {
+      "copilot_requests": "unverified"
+    },
+    "expiresAt": "2026-09-14T22:04:44Z",
+    "evidence": []
+  },
+  "models": [
+    {
+      "displayName": "GPT-6 Astra",
+      "id": "gpt-6-astra",
+      "available": false,
+      "flagship": true,
+      "effortsComplete": false,
+      "supportedEfforts": [
+        "max"
+      ],
+      "inputModalities": [
+        "text"
+      ],
+      "responseModelIds": [],
+      "availabilityEvidence": [],
+      "effortEvidence": [],
+      "modalityEvidence": [],
+      "responseModelEvidence": []
+    },
+    {
+      "displayName": "Claude Opus 5",
+      "id": "claude-opus-5",
+      "available": false,
+      "flagship": true,
+      "effortsComplete": false,
+      "supportedEfforts": [
+        "max"
+      ],
+      "inputModalities": [
+        "text"
+      ],
+      "responseModelIds": [],
+      "availabilityEvidence": [],
+      "effortEvidence": [],
+      "modalityEvidence": [],
+      "responseModelEvidence": []
+    }
+  ],
+  "ownerAttestations": {
+    "verificationTimestamp": "2026-09-14T22:04:44Z",
+    "planningImplementationRepair": {
+      "modelId": "gpt-6-astra",
+      "effort": "max",
+      "reportedContextWindow": "1M",
+      "source": "owner-attestation"
+    },
+    "review": {
+      "modelId": "claude-opus-5",
+      "effort": "max",
+      "reportedContextWindow": "1M",
+      "source": "owner-attestation"
+    },
+    "replacementInferencePat": {
+      "tokenSha256": "d23b3c894755a5114ecea82ade9850714fd752b6e372b1bf81a6380a0cc6b1c7",
+      "storedInEnvironmentSecret": "factory-inference/COPILOT_GITHUB_TOKEN",
+      "source": "owner-attestation"
+    }
+  },
+  "remainingVerificationRequirements": [
+    "Collect local authenticated CLI /model evidence files and SHA-256 hashes for exact model availability.",
+    "Verify and record complete supported effort lists for each selected model; max support alone is insufficient.",
+    "Verify and record native image-input support and keep visual role null until explicit owner approval evidence exists.",
+    "Verify and record backend response model identities for each selected model.",
+    "Verify PAT scope/account/expiry evidence and update authentication.permissions and authentication.expiresAt from reviewed evidence.",
+    "Set review.method to manual-authenticated-cli, populate review.evidence, and only then set review.approved=true with dated sign-off."
+  ],
+  "issueReference": "#5"
+}
