@@ -58,15 +58,20 @@ export function assertBudgetLedger(budget) {
   return budget;
 }
 
+function totals(budget) {
+  let reservedUsdCents = 0;
+  let unresolvedUsdCents = 0;
+  for (const item of budget.reservations) {
+    if (item.status === 'reserved') reservedUsdCents += item.reservedUsdCents;
+    if (item.status === 'unresolved') unresolvedUsdCents += item.reservedUsdCents;
+  }
+  return { reservedUsdCents, unresolvedUsdCents };
+}
+
 export function budgetVisibility(budget, config) {
   assertBudgetLedger(budget);
   const { cumulativeCapUsdCents } = validateTrustedBudget(config);
-  const reservedUsdCents = budget.reservations
-    .filter(item => item.status === 'reserved')
-    .reduce((sum, item) => sum + item.reservedUsdCents, 0);
-  const unresolvedUsdCents = budget.reservations
-    .filter(item => item.status === 'unresolved')
-    .reduce((sum, item) => sum + item.reservedUsdCents, 0);
+  const { reservedUsdCents, unresolvedUsdCents } = totals(budget);
   return {
     cumulativeCapUsdCents,
     cumulativeSpendUsdCents: budget.cumulativeSpendUsdCents,
@@ -77,7 +82,7 @@ export function budgetVisibility(budget, config) {
 }
 
 export function reserveInferenceBudget(state, config, { key, action, taskId, runId, reservedUsdCents, now }) {
-  validateTrustedBudget(config);
+  const { cumulativeCapUsdCents } = validateTrustedBudget(config);
   assertBudgetLedger(state.budget);
   if (!INFERENCE_ACTIONS.includes(action)) return null;
   const existing = state.budget.reservations.find(item => item.key === key);
@@ -94,8 +99,8 @@ export function reserveInferenceBudget(state, config, { key, action, taskId, run
     throw new BudgetError('budget-cost-bound-unavailable',
       'No trustworthy per-inference cost upper bound is available; refusing billable inference');
   }
-  const visibility = budgetVisibility(state.budget, config);
-  if (reservedUsdCents > visibility.availableUsdCents) {
+  const { reservedUsdCents: existingReserved, unresolvedUsdCents } = totals(state.budget);
+  if (reservedUsdCents > cumulativeCapUsdCents - state.budget.cumulativeSpendUsdCents - existingReserved - unresolvedUsdCents) {
     throw new BudgetError('budget-exhausted', 'Cumulative inference spending cap is exhausted');
   }
   const reservation = { key, action, taskId, runId, reservedUsdCents, status: 'reserved', createdAt: now };
@@ -108,18 +113,17 @@ export function settleInferenceBudget(state, key, settlement, now) {
   assertBudgetLedger(state.budget);
   const reservation = state.budget.reservations.find(item => item.key === key);
   if (!reservation) throw new BudgetError('budget-missing-reservation', 'Missing inference budget reservation');
-  if (reservation.status === 'settled') {
-    if ((settlement?.settlementKey && settlement.settlementKey !== reservation.settlementKey) ||
-        (Number.isSafeInteger(settlement?.costUsdCents) && settlement.costUsdCents !== reservation.settledUsdCents) ||
-        (settlement?.source && settlement.source !== reservation.source)) {
-      throw new BudgetError('budget-settlement-conflict', 'Inference budget settlement identity mismatch');
-    }
-    return reservation;
-  }
   const valid = settlement && Number.isSafeInteger(settlement.costUsdCents) && settlement.costUsdCents >= 0 &&
     settlement.costUsdCents <= reservation.reservedUsdCents &&
     typeof settlement.settlementKey === 'string' && settlement.settlementKey.length > 0 &&
     typeof settlement.source === 'string' && settlement.source.length > 0;
+  if (reservation.status === 'settled') {
+    if (!valid || settlement.settlementKey !== reservation.settlementKey ||
+        settlement.costUsdCents !== reservation.settledUsdCents || settlement.source !== reservation.source) {
+      throw new BudgetError('budget-settlement-conflict', 'Inference budget settlement identity mismatch');
+    }
+    return reservation;
+  }
   if (!valid) {
     reservation.status = 'unresolved';
     reservation.reason = 'missing-trustworthy-cost';

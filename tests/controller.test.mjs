@@ -86,6 +86,7 @@ test('inference budget settlement is idempotent and unknown costs stay unresolve
   settleInferenceBudget(state, 'known', { settlementKey: 'same-receipt', costUsdCents: 25, source: 'trusted-test' }, NOW + 1);
   settleInferenceBudget(state, 'known', { settlementKey: 'same-receipt', costUsdCents: 25, source: 'trusted-test' }, NOW + 2);
   assert.equal(state.budget.cumulativeSpendUsdCents, 25);
+  assert.throws(() => settleInferenceBudget(state, 'known', null, NOW + 3), /mismatch/);
   assert.throws(() => settleInferenceBudget(state, 'known',
     { settlementKey: 'different-receipt', costUsdCents: 25, source: 'trusted-test' }, NOW + 3), /mismatch/);
 

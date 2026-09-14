@@ -453,13 +453,13 @@ export async function advance(input, adapter, { now = Date.now(), persist = asyn
   if (state.mode === 'real' && INFERENCE_ACTIONS.includes(action)) {
     try {
       const existing = state.budget.reservations.find(item => item.key === intent.key);
-      const quote = existing ? existing : await adapter.quoteInferenceBudget?.(action, freeze(clone(task)), freeze({
+      const costBound = existing ? existing : await adapter.quoteInferenceBudget?.(action, freeze(clone(task)), freeze({
         mode: state.mode, now, runId: state.runId, idempotencyKey: intent.key,
         attempt: intent.attempt, evidence: clone(task.evidence),
       }));
       reserveInferenceBudget(state, adapter.config, {
         key: intent.key, action, taskId: task.id, runId: state.runId,
-        reservedUsdCents: quote?.reservedUsdCents, now,
+        reservedUsdCents: costBound?.reservedUsdCents, now,
       });
     } catch (error) {
       block(task, error instanceof BudgetError ? error.code : 'budget-cost-bound-unavailable', now);
