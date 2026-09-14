@@ -77,13 +77,16 @@ export function budgetVisibility(budget, config) {
 }
 
 export function reserveInferenceBudget(state, config, { key, action, taskId, runId, reservedUsdCents, now }) {
-  const { cumulativeCapUsdCents } = validateTrustedBudget(config);
+  validateTrustedBudget(config);
   assertBudgetLedger(state.budget);
   if (!INFERENCE_ACTIONS.includes(action)) return null;
   const existing = state.budget.reservations.find(item => item.key === key);
   if (existing) {
     if (existing.action !== action || existing.taskId !== taskId || existing.runId !== runId) {
       throw new BudgetError('budget-reservation-conflict', 'Inference budget reservation identity mismatch');
+    }
+    if (existing.status !== 'reserved') {
+      throw new BudgetError('budget-reservation-unavailable', 'Inference budget reservation is not available for dispatch');
     }
     return existing;
   }
@@ -98,9 +101,6 @@ export function reserveInferenceBudget(state, config, { key, action, taskId, run
   const reservation = { key, action, taskId, runId, reservedUsdCents, status: 'reserved', createdAt: now };
   state.budget.reservations.push(reservation);
   assertBudgetLedger(state.budget);
-  if (state.budget.cumulativeSpendUsdCents > cumulativeCapUsdCents) {
-    throw new BudgetError('budget-exhausted', 'Cumulative inference spend exceeds the configured cap');
-  }
   return reservation;
 }
 

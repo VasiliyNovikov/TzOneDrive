@@ -93,6 +93,9 @@ test('inference budget settlement is idempotent and unknown costs stay unresolve
     { key: 'unknown', action: 'validate', taskId: 'feature', runId: 'run', reservedUsdCents: 200, now: NOW + 4 });
   assert.throws(() => settleInferenceBudget(state, 'unknown', null, NOW + 5), /usage\/cost/);
   assert.equal(state.budget.reservations.find(item => item.key === 'unknown').status, 'unresolved');
+  assert.throws(() => reserveInferenceBudget(state, budgetConfig(1000),
+    { key: 'unknown', action: 'validate', taskId: 'feature', runId: 'run', reservedUsdCents: 1, now: NOW + 6 }),
+  /not available/);
   assert.equal(budgetVisibility(state.budget, budgetConfig(1000)).unresolvedUsdCents, 200);
 });
 
