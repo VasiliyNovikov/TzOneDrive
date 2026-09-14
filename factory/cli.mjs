@@ -9,6 +9,9 @@ import { fileURLToPath } from 'node:url';
 import {
   CLI_VERSION, PolicyError, assertPinnedResolution, digest, requirePolicy, resolvePolicy
 } from './model-policy.mjs';
+import { verifyTelemetry } from './telemetry.mjs';
+
+export { verifyTelemetry };
 
 const DEFAULT_POLICY = fileURLToPath(new URL('./model-policy.json', import.meta.url));
 const MAX_OUTPUT = 16 * 1024 * 1024;
@@ -38,7 +41,7 @@ export const SAFE_CONFIG = Object.freeze({
 
 const OPTION_KEYS = new Set([
   'role', 'prompt', 'cwd', 'attachments', 'policy', 'policyPath', 'catalog', 'catalogPath',
-  'resolution', 'cliPath', 'runId', 'timeoutMs', 'roles'
+  'resolution', 'cliPath', 'runId', 'timeoutMs', 'roles', 'correlationId'
 ]);
 
 function rejectOverrides(options) {
@@ -385,14 +388,19 @@ export async function invokeRole(options) {
       cwd: workspace.workdir, env, timeoutMs: options.timeoutMs ?? 600000
     });
     const rawTelemetry = await readTelemetry(telemetryPath);
-    const telemetry = verifyTelemetry(rawTelemetry, resolved, { stderr: result.stderr });
+    const telemetry = verifyTelemetry(rawTelemetry, resolved, {
+      contract: catalog.telemetryContract,
+      evidenceIds: new Set(catalog.review.evidence.map(item => item.id)),
+      requireBackendEffort: resolution.requireBackendEffort,
+      correlationId: options.correlationId
+    });
     assertPinnedResolution(resolution, policy, catalog);
     requirePolicy(result.stdout.trim().length > 0, 'EMPTY_RESPONSE', 'CLI returned no response');
     const audit = {
       callId, role: options.role, runId: resolution.runId, snapshotHash: resolution.snapshotHash,
       configured: { desiredDisplayName: resolved.desiredDisplayName },
       requested: { modelId: resolved.modelId, effort: resolved.effort },
-      resolved: { modelId: resolved.modelId, effort: resolved.effort },
+      observed: telemetry.observed,
       telemetry, responseSha256: digest(result.stdout), telemetrySha256: digest(rawTelemetry),
       completedAt: new Date().toISOString()
     };
@@ -403,15 +411,12 @@ export async function invokeRole(options) {
   }
 }
 
-export function verifyTelemetry() {
-  throw new PolicyError('TELEMETRY_SCHEMA_UNVERIFIED', 'A verified supported exporter schema is required; no inference result can be accepted');
-}
-
 export const MANUAL_CATALOG_PROCEDURE = Object.freeze([
   'Run refresh with the separately installed official @github/copilot@1.0.83; retain exact --version/help/config/environment/monitoring evidence.',
   'A human owner uses the official authenticated interactive /model interface to verify the exact desired flagship IDs, availability, each complete supported-effort list and native image-input support. CLI-wide choices alone are insufficient. If the interface does not expose any requirement, stop; never guess or invent an API.',
   'Record local evidence files with SHA-256 and sources; obtain explicit dated visual owner approval for the exact verified flagship ID. Keep visual null until then.',
   'Record documented backend response model identities and their correspondence to each requested model. Unknown or missing response identity fails closed.',
+  'Capture the supported exact-version exporter contract (record type, status, correlation, requested/response model fields and their backend provenance) and bind it to reviewed evidence as catalog.telemetryContract. Without it every inference result is rejected.',
   'Review the dedicated fine-grained inference PAT: Copilot Requests only, no repository access. Record its SHA-256 (never the token), account, expiry and scope-review evidence. The GitHub App publishing credential is never valid for inference.',
   'Sign off review.approved, review.reviewer, review.reviewedAt, review.notes and method=manual-authenticated-cli. Set capturedAt/expiresAt at most 24 hours apart. Import the explicit reviewed catalog JSON with --catalog; no automatic catalog refresh or discovery API is used.',
   'Preflight pins the reviewed policy/catalog and verified CLI for one run, at most one hour. Changed or expired pins require a new run. Preflight never claims backend response or reasoning verification without real telemetry.'

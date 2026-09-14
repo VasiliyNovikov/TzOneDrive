@@ -228,11 +228,80 @@ catalog evidence, selected ID/effort and any exposed response telemetry
 separately. Do not label a configured model as an observed backend model.
 No real inference was performed during scaffolding.
 
-The response-telemetry parser is also an explicit implementation gate:
-`verifyTelemetry()` currently rejects every inference result with
+The response-telemetry parser is also an explicit implementation gate.
+`factory/telemetry.mjs` implements a bounded, strict JSON-lines parser and a
+contract-driven validator, but it validates **nothing** until the reviewed
+catalog carries a `telemetryContract` that an owner verified against an
+authenticated exact-version capture. The shipped catalog has no such contract,
+so every inference result is still rejected with
 `TELEMETRY_SCHEMA_UNVERIFIED`. Populating a catalog or enabling a repository
-variable does not remove that gate. Telemetry loading now rejects oversized,
+variable does not remove that gate. Telemetry loading rejects oversized,
 non-UTF-8 and linked files, but safe input loading is not model verification.
+
+The contract must name the record type, the completed-status value, the
+requested/response model fields and a per-call correlation binding, and must
+assert `provenance.responseModel: "backend-observed"` plus verified fallback
+reporting, each referencing reviewed catalog evidence. The validator then
+blocks malformed, blank, truncated, oversized, uncorrelated, mixed-call,
+partial/failed, request-mismatched and unapproved-response-model records, and
+reports backend effort as `unavailable` unless the contract verifies it. A
+requested effort is never recorded as an executed backend effort.
+
+### Verified telemetry and billing findings (retrieved 2026-09-14)
+
+Established by primary official documentation:
+
+* The `file` exporter writes "all signals to this file as JSON-lines"
+  (`COPILOT_OTEL_FILE_EXPORTER_PATH`), and `chat` spans carry
+  `gen_ai.request.model` ("Requested model") and `gen_ai.response.model`
+  ("Resolved model"), alongside `gen_ai.response.id`,
+  `github.copilot.turn_id` and `github.copilot.interaction_id`.
+* `gen_ai.invoke_agent.inference_calls` is "counted at provider dispatch
+  (failed and partial calls included; requests blocked before dispatch
+  excluded)", so one CLI invocation can bill several provider requests.
+* `github.copilot.nano_aiu` must be read "from the root `invoke_agent` span
+  only", because the attribute is also stamped on child `chat` spans and
+  summing it double counts. `github.copilot.cost` is documented as "a
+  per-request model multiplier used for billing calculations — it is not a
+  currency value and must not be interpreted as one".
+* Usage is billed in AI credits, where **1 AI credit = USD 0.01**. Premium
+  requests are legacy (annual Pro/Pro+ only); the "one premium request per CLI
+  prompt" rule appears only in that legacy article.
+* The documented session cap `maxAiCredits` is a **soft** cap: "Usage is
+  checked after model calls return, so one response can exceed the configured
+  value before the runtime blocks the next model call."
+
+**Not established** by any documentation reviewed, and therefore still
+blocking: no record-level JSON-lines schema, envelope or field types; no schema
+version or stability guarantee (the referenced GenAI conventions are
+Development-tier and the CLI changelog records breaking attribute renames); no
+statement that `gen_ai.response.model` is backend-observed rather than an echo
+of the request, and no documented fallback reporting for it;
+`gen_ai.request.reasoning.level` is absent from GitHub's reference docs and
+carries no backend-execution semantics; no documented per-call identifier that
+joins telemetry to a billing record; no per-request cost API and **no pre-call
+cost upper bound** (billing REST endpoints are day-level aggregates); no
+documented conversion from tokens or nano AI units to credits or USD; and no
+per-CLI-version documentation, so nothing above is pinned to exactly 1.0.83.
+Closing these gaps requires an authenticated exact-version capture that this
+repository cannot obtain without spending money.
+
+### Telemetry and cost readiness
+
+| Category | Status |
+| --- | --- |
+| Supported implementation | Bounded JSON-lines parsing; contract-driven schema, provenance, correlation, identity, completeness and duplicate-safe usage validation; fail-closed pre-call cost bound wired into the production adapter; durable idempotent reservation/settlement accounting |
+| Test-only scaffolding | `tests/telemetry.test.mjs` and `tests/inference-cost.test.mjs` fixtures. These contracts, records, rates and bounds are **invented for offline control-flow tests**, are labelled as such in the files, and are never evidence of any CLI behaviour, catalog approval or authentication |
+| Unresolved blockers | An authenticated exact-version exporter capture establishing the record schema and the backend provenance of the response model and fallback behaviour; a vendor-documented enforceable pre-call cost bound and a per-call settlement source; the still-empty authenticated catalog evidence |
+
+The smallest genuinely useful owner action is the authenticated exact-version
+capture described in the catalog procedure — an owner-run authenticated CLI
+session that records the `/model` evidence and one exporter capture, retained
+locally with hashes. Everything else is engineering or vendor dependency: no
+repository change can establish a backend-provenance guarantee or a pre-call
+cost bound that the service does not offer. This work is tracked in
+[issue #5](https://github.com/VasiliyNovikov/TzOneDrive/issues/5), which
+remains open; browser-only completion and physical TV acceptance are separate.
 
 Exact-version static inspection verified the Linux npm archive's integrity
 (SHA-256 `23906ffd14c5e29fc1325138fba7d8ea1a397e02ffdcd36383fe66e4d196ba46`).
@@ -416,6 +485,20 @@ billable operation and a trustworthy settlement afterward. This repository gate
 does not change GitHub account or organization billing settings and does not
 cover costs outside factory inference.
 
+`factory/inference-cost.mjs` is that missing pre-call gate, expressed as a
+fail-closed contract. The production adapter now quotes every billable action
+through it, so a task blocks with `budget-cost-source-unverified` before any
+dispatch unless trusted config carries a verified `inferenceCostSource`. A
+verified source must declare an owner-reviewed official billing reference, a
+billable unit (AI credits, premium requests or USD cents — tokens, nano AI
+units and the cost multiplier are explicitly unconvertible), an integer USD-cent
+rate, an **enforceable** pre-call bound that covers hidden retries and
+delegation, and a backend-reported settlement in the same unit. The documented
+soft `maxAiCredits` cap does not satisfy the bound requirement, and no such
+source is configured, so no live inference can be dispatched. There are no
+inference-call count limits, and settlement never resets or reduces recorded
+spend: an unresolved outcome keeps its reservation.
+
 Workers use only read-only `GITHUB_TOKEN` access to verify repository state.
 Checkout credentials are not persisted; controller jobs do not run app code,
 package scripts or inference. Only bounded structured receipts are uploaded,
@@ -590,6 +673,13 @@ unverified prerequisites.
 * [Contemporaneous CLI telemetry reference](https://github.com/github/docs/blob/a4e23419965182fe7ee23cb207df26087c0279a3/content/copilot/reference/copilot-cli-reference/cli-command-reference.md#opentelemetry-monitoring)
   and [pinned Linux package metadata](https://registry.npmjs.org/@github/copilot-linux-x64/1.0.83);
   neither documentation nor package string tables establish backend identity.
+* [CLI command reference — OpenTelemetry monitoring](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference),
+  [individual billing and AI credits](https://docs.github.com/en/copilot/concepts/billing-and-usage/individuals/billing),
+  [legacy premium requests](https://docs.github.com/en/copilot/reference/copilot-billing/request-based-billing-legacy/copilot-requests),
+  [billing usage REST API](https://docs.github.com/en/rest/billing/usage) and
+  [billing budgets REST API](https://docs.github.com/en/rest/billing/budgets);
+  none of these documents a record schema, backend model provenance or a
+  pre-call cost bound.
 * [Workflow trigger restrictions](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow).
 * [GitHub App installation tokens](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation).
 * [Samsung TV developer documentation](https://developer.samsung.com/smarttv/develop)

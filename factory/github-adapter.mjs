@@ -4,6 +4,7 @@ import {
   quarantineMissingBudgetLedger, validateTrustedBudget
 } from './budget.mjs';
 import { GitHubAPI, GitHubContentsLedger, REPOSITORY } from './github-api.mjs';
+import { preCallCostBound } from './inference-cost.mjs';
 import { resolvePolicy } from './model-policy.mjs';
 
 const SHA = /^[a-f0-9]{40}$/;
@@ -397,6 +398,9 @@ export async function authorizeDispatch(api, inputs, env = process.env) {
 
 export async function createAdapter(options = {}) {
   const adapter = new GitHubAdapter({ token: options.token ?? process.env.FACTORY_GITHUB_TOKEN, ...options });
+  // Every billable action must obtain an enforceable upper bound before dispatch.
+  // Without a verified cost source this throws and the controller blocks the task.
+  adapter.quoteInferenceBudget = async action => preCallCostBound(adapter.config?.inferenceCostSource, { action });
   adapter.execute = async (action, task, context) => {
     const key = wireKey(context.idempotencyKey);
     const pass = fields => ({ verdict: 'PASS', simulated: false, ...fields });
