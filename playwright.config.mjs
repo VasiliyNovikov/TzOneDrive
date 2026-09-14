@@ -1,11 +1,5 @@
 import { defineConfig } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
-import path from 'node:path';
 
-// Keep browser profiles and installation scratch space inside the workspace.
-process.env.TMPDIR = path.resolve('tests/browser/.runtime');
-process.env.PLAYWRIGHT_BROWSERS_PATH ||= path.resolve('node_modules/.cache/playwright');
-mkdirSync(process.env.TMPDIR, { recursive: true });
 const port = Number(process.env.PORT || 4173);
 
 export default defineConfig({
@@ -15,7 +9,7 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   reporter: 'list',
-  outputDir: 'tests/browser/.results',
+  outputDir: 'test-results',
   use: {
     baseURL: `http://127.0.0.1:${port}`,
     trace: 'retain-on-failure',

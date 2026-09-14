@@ -9,12 +9,13 @@ async function openCollection(page) {
   await expect(page.locator('[data-focus-id="photo-coast"]')).toBeFocused();
 }
 
-test('startup shows complete build/device identity and records keyboard and Tizen Back input', async ({ page }) => {
+test('startup shows complete build/device identity and records keyboard and Tizen Back input', async ({ page, baseURL }) => {
   const errors = [];
   const remoteRequests = [];
+  const appOrigin = new URL(baseURL).origin;
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('request', (request) => {
-    if (new URL(request.url()).origin !== new URL(page.url()).origin) remoteRequests.push(request.url());
+    if (new URL(request.url()).origin !== appOrigin) remoteRequests.push(request.url());
   });
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Device diagnostics' })).toBeVisible();

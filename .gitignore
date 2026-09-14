@@ -437,3 +437,11 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Browser test artifacts
+tests/browser/.results/
+tests/browser/.runtime/
+
+# Private factory worker output and scratch space
+.factory-output/
+.factory-runtime/
