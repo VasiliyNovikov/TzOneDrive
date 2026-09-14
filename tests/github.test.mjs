@@ -239,6 +239,7 @@ function dispatchFixture(stage = 'plan') {
     GITHUB_WORKFLOW_REF: `${config.repository}/.github/workflows/${workflow}@refs/heads/master`,
     GITHUB_ACTOR: config.appBotLogin, GITHUB_TRIGGERING_ACTOR: config.appBotLogin,
     FACTORY_ENABLED: 'true', FACTORY_STOP: 'false', FACTORY_APP_ID: String(config.appId),
+    FACTORY_BUDGET_USD_CENTS: String(config.inferenceBudget.cumulativeCapUsdCents),
     ...Object.fromEntries(Object.entries(inputs).map(([key, value]) => [`FACTORY_${key.toUpperCase()}`, value]))
   };
   const pr = { number: 42, merged: true, merge_commit_sha: sha, body: marker(task.id, 'publish-key'),
@@ -521,10 +522,12 @@ function controllerFixture() {
 
 test('controller authorizes only the current owner harness or explicitly opted-in schedule', async () => {
   const { api, env } = controllerFixture();
-  await authorizeController(api, env);
+  const authorized = await authorizeController(api, { ...env, FACTORY_BUDGET_USD_CENTS: '750000' });
+  assert.equal(authorized.config.inferenceBudget.cumulativeCapUsdCents, 750000);
   await assert.rejects(authorizeController(api, { ...env, GITHUB_ACTOR: config.appBotLogin }), /Only owner/);
   await assert.rejects(authorizeController(api, { ...env, GITHUB_TRIGGERING_ACTOR: 'other' }), /Only owner/);
   await assert.rejects(authorizeController(api, { ...env, GITHUB_SHA: 'c'.repeat(40) }), /harness/);
+  await assert.rejects(authorizeController(api, { ...env, FACTORY_BUDGET_USD_CENTS: '5000.00' }), /FACTORY_BUDGET_USD_CENTS/);
   const schedule = { ...env, GITHUB_EVENT_NAME: 'schedule' };
   await assert.rejects(authorizeController(api, schedule), /opt-in/);
   await authorizeController(api, { ...schedule, FACTORY_SCHEDULE_ENABLED: 'true' });
@@ -671,6 +674,7 @@ test('workflow credential boundaries keep controller, browser, inference and LAN
   assert.match(controller, /FACTORY_SCHEDULE_ENABLED == 'true'/);
   assert.match(controller, /environment: factory-control/);
   assert.match(controller, /repositories: TzOneDrive/);
+  assert.match(controller, /FACTORY_BUDGET_USD_CENTS: \$\{\{ secrets\.FACTORY_BUDGET_USD_CENTS \}\}/);
   assert.doesNotMatch(controller, /^\s+run:.*(?:npm|playwright|worker\.mjs|app\/)/m);
   assert.doesNotMatch(controller, /COPILOT_GITHUB_TOKEN|permission-workflows:/);
   assert.doesNotMatch(worker + device, /FACTORY_APP_PRIVATE_KEY|FACTORY_GITHUB_TOKEN|permission-[\w-]+: write/);

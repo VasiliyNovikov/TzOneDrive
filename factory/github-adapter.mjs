@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
-import { INFERENCE_ACTIONS, assertBudgetLedger, quarantineMissingBudgetLedger, validateTrustedBudget } from './budget.mjs';
+import {
+  INFERENCE_ACTIONS, applyEnvironmentBudget, assertBudgetLedger,
+  quarantineMissingBudgetLedger, validateTrustedBudget
+} from './budget.mjs';
 import { GitHubAPI, GitHubContentsLedger, REPOSITORY } from './github-api.mjs';
 import { resolvePolicy } from './model-policy.mjs';
 
@@ -311,6 +314,7 @@ export async function authorizeController(api, env = process.env) {
   assertWorkflowContext(current, 'factory-controller.yml', env);
   const config = await readJSON(api, 'factory/trusted-config.json', current.sha);
   assertAppIdentity(config);
+  const effectiveConfig = applyEnvironmentBudget(config, env);
   if (String(config.appId) !== env.FACTORY_APP_ID ||
       !['schedule', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME) ||
       (env.GITHUB_EVENT_NAME === 'schedule' && env.FACTORY_SCHEDULE_ENABLED !== 'true') ||
@@ -318,7 +322,7 @@ export async function authorizeController(api, env = process.env) {
         (env.GITHUB_ACTOR !== config.owner || env.GITHUB_TRIGGERING_ACTOR !== config.owner))) {
     throw new Error('Only owner dispatch or the opt-in trusted default-branch schedule can run the controller');
   }
-  return { ...current, config };
+  return { ...current, config: effectiveConfig };
 }
 
 export async function authorizeDispatch(api, inputs, env = process.env) {

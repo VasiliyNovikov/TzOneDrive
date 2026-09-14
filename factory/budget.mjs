@@ -19,6 +19,22 @@ export function validateTrustedBudget(config) {
   return { cumulativeCapUsdCents: budget.cumulativeCapUsdCents };
 }
 
+export function applyEnvironmentBudget(config, env = process.env) {
+  const fallback = validateTrustedBudget(config);
+  const raw = env.FACTORY_BUDGET_USD_CENTS;
+  if (raw === undefined || raw === '') return { ...config, inferenceBudget: fallback };
+  if (!/^(?:0|[1-9][0-9]{0,14})$/.test(raw)) {
+    throw new BudgetError('budget-invalid-config',
+      'FACTORY_BUDGET_USD_CENTS must be a nonnegative integer number of USD cents');
+  }
+  const cumulativeCapUsdCents = Number(raw);
+  if (!Number.isSafeInteger(cumulativeCapUsdCents)) {
+    throw new BudgetError('budget-invalid-config',
+      'FACTORY_BUDGET_USD_CENTS must be a safe integer number of USD cents');
+  }
+  return { ...config, inferenceBudget: { cumulativeCapUsdCents } };
+}
+
 export function createBudgetLedger() {
   return {
     schemaVersion: 1,

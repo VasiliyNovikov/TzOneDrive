@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createState, advance, runLoop } from '../factory/controller.mjs';
 import {
-  budgetVisibility, reserveInferenceBudget, settleInferenceBudget, validateTrustedBudget
+  applyEnvironmentBudget, budgetVisibility, reserveInferenceBudget, settleInferenceBudget, validateTrustedBudget
 } from '../factory/budget.mjs';
 import { createMockAdapter } from '../factory/main.mjs';
 import { StateLockedError, withStore } from '../factory/store.mjs';
@@ -42,11 +42,18 @@ test('trusted goals, IDs, dependency graph, and modes are validated', async () =
 
 test('trusted inference budget config uses integer cumulative USD cents', () => {
   assert.deepEqual(validateTrustedBudget(budgetConfig(500000)), { cumulativeCapUsdCents: 500000 });
+  assert.equal(applyEnvironmentBudget(budgetConfig(500000),
+    { FACTORY_BUDGET_USD_CENTS: '750000' }).inferenceBudget.cumulativeCapUsdCents, 750000);
+  assert.equal(applyEnvironmentBudget(budgetConfig(500000), {}).inferenceBudget.cumulativeCapUsdCents, 500000);
   for (const inferenceBudget of [
     undefined, {}, { cumulativeCapUsdCents: 1.5 }, { cumulativeCapUsdCents: -1 },
     { cumulativeCapUsdCents: 500000, resetsMonthly: true }
   ]) {
     assert.throws(() => validateTrustedBudget({ inferenceBudget }), /cumulativeCapUsdCents|trusted config/);
+  }
+  for (const value of ['5000.00', '-1', ' 500000', '1e6', '9007199254740992']) {
+    assert.throws(() => applyEnvironmentBudget(budgetConfig(500000),
+      { FACTORY_BUDGET_USD_CENTS: value }), /FACTORY_BUDGET_USD_CENTS/);
   }
 });
 
