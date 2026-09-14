@@ -5,8 +5,8 @@
   "enabled": false,
   "stop": true,
   "ledgerBranch": "factory-ledger",
-  "appBotLogin": null,
-  "appId": null,
+  "appBotLogin": "tzonedrivefactory[bot]",
+  "appId": 4941551,
   "workflows": {
     "worker": "factory-worker.yml",
     "device": "factory-device.yml"
