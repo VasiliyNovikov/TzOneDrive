@@ -354,7 +354,7 @@ export async function authorizeDispatch(api, inputs, env = process.env) {
     throw new Error('Dispatch disagrees with its persisted workflow ticket');
   }
   if (INFERENCE_ACTIONS.includes(inputs.stage)) {
-    const reservation = state.budget.reservations.find(item => item.key === task.intent.key);
+    const reservation = state.budget.reservations[task.intent.key];
     if (!reservation || reservation.status !== 'reserved' || reservation.action !== inputs.stage ||
         reservation.taskId !== inputs.task || reservation.runId !== state.runId) {
       throw new Error('Dispatch lacks a durable inference budget reservation');

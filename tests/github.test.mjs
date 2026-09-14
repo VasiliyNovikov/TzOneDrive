@@ -227,10 +227,11 @@ function dispatchFixture(stage = 'plan') {
   };
   const workflow = stage === 'deploy' ? 'factory-device.yml' : 'factory-worker.yml';
   if (['plan', 'implement', 'repair', 'validate'].includes(stage)) {
-    state.budget.reservations.push({
+    state.budget.reservations[task.intent.key] = {
       key: task.intent.key, action: stage, taskId: task.id, runId: state.runId,
       reservedUsdCents: 1000, status: 'reserved', createdAt: Date.now(),
-    });
+    };
+    state.budget.reservedUsdCents = 1000;
   }
   const env = {
     GITHUB_REPOSITORY: config.repository, GITHUB_EVENT_NAME: 'workflow_dispatch',
@@ -455,7 +456,7 @@ test('dispatch cannot use stale, simulated, expired or substituted task state', 
     ({ task }) => { task.intent = null; },
     ({ task }) => { task.intent.key = 'superseded'; },
     ({ task }) => { task.goal = 'Unapproved replacement goal'; },
-    ({ state }) => { state.budget.reservations = []; },
+    ({ state }) => { state.budget.reservations = {}; state.budget.reservedUsdCents = 0; },
     ({ inputs }) => { inputs.task = 'other'; },
     ({ inputs }) => { inputs.stage = 'implement'; },
     ({ inputs }) => { inputs.harness = 'b'.repeat(40); },

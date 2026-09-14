@@ -452,7 +452,7 @@ export async function advance(input, adapter, { now = Date.now(), persist = asyn
   if (intent.action !== action) throw new Error('Intent/stage mismatch');
   if (state.mode === 'real' && INFERENCE_ACTIONS.includes(action)) {
     try {
-      const existing = state.budget.reservations.find(item => item.key === intent.key);
+      const existing = state.budget.reservations[intent.key];
       const costBound = existing ? existing : await adapter.quoteInferenceBudget?.(action, freeze(clone(task)), freeze({
         mode: state.mode, now, runId: state.runId, idempotencyKey: intent.key,
         attempt: intent.attempt, evidence: clone(task.evidence),

@@ -93,7 +93,7 @@ test('inference budget settlement is idempotent and unknown costs stay unresolve
   reserveInferenceBudget(state, budgetConfig(1000),
     { key: 'unknown', action: 'validate', taskId: 'feature', runId: 'run', reservedUsdCents: 200, now: NOW + 4 });
   assert.throws(() => settleInferenceBudget(state, 'unknown', null, NOW + 5), /usage\/cost/);
-  assert.equal(state.budget.reservations.find(item => item.key === 'unknown').status, 'unresolved');
+  assert.equal(state.budget.reservations.unknown.status, 'unresolved');
   assert.throws(() => reserveInferenceBudget(state, budgetConfig(1000),
     { key: 'unknown', action: 'validate', taskId: 'feature', runId: 'run', reservedUsdCents: 1, now: NOW + 6 }),
   /not available/);
@@ -161,7 +161,7 @@ test('real inference requires a pre-call budget reservation and settled trustwor
   }, { now: NOW });
   assert.equal(state.status, 'blocked');
   assert.equal(state.tasks[0].blockedReason, 'budget-settlement-unavailable');
-  assert.equal(state.budget.reservations[0].status, 'unresolved');
+  assert.equal(Object.values(state.budget.reservations)[0].status, 'unresolved');
 
   state = await advance(initial({}, 'real'), {
     config: budgetConfig(500000),
@@ -175,7 +175,7 @@ test('real inference requires a pre-call budget reservation and settled trustwor
   }, { now: NOW });
   assert.equal(state.tasks[0].stage, 'implement');
   assert.equal(state.budget.cumulativeSpendUsdCents, 75);
-  assert.equal(state.budget.reservations[0].status, 'settled');
+  assert.equal(Object.values(state.budget.reservations)[0].status, 'settled');
 });
 
 test('a failure saving intent prevents the side effect', async () => {
