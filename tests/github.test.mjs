@@ -17,7 +17,8 @@ import {
 const sha = 'a'.repeat(40);
 const config = {
   repository: 'VasiliyNovikov/TzOneDrive', owner: 'VasiliyNovikov',
-  appBotLogin: 'fixture-factory[bot]', appId: 123
+  appBotLogin: 'fixture-factory[bot]', appId: 123,
+  inferenceBudget: { cumulativeCapUsdCents: 500000 }
 };
 const jsonFile = value => ({
   encoding: 'base64', size: 100, content: Buffer.from(JSON.stringify(value)).toString('base64')
@@ -225,6 +226,12 @@ function dispatchFixture(stage = 'plan') {
     head: ['validate', 'repair'].includes(stage) ? candidate : sha, base: sha, harness: sha
   };
   const workflow = stage === 'deploy' ? 'factory-device.yml' : 'factory-worker.yml';
+  if (['plan', 'implement', 'repair', 'validate'].includes(stage)) {
+    state.budget.reservations.push({
+      key: task.intent.key, action: stage, taskId: task.id, runId: state.runId,
+      reservedUsdCents: 1000, status: 'reserved', createdAt: Date.now(),
+    });
+  }
   const env = {
     GITHUB_REPOSITORY: config.repository, GITHUB_EVENT_NAME: 'workflow_dispatch',
     GITHUB_REF: 'refs/heads/master', GITHUB_SHA: sha,
@@ -349,7 +356,8 @@ function restartableDispatch(failure) {
         path: '.github/workflows/factory-worker.yml', status: 'completed', conclusion: 'success'
       }];
     },
-    downloadResult: async () => ({ ...ticket(), plan: 'Recovered trusted plan' })
+    downloadResult: async () => ({ ...ticket(), plan: 'Recovered trusted plan',
+      inferenceBilling: { settlementKey: ticket().key, costUsdCents: 1, source: 'trusted-test' } })
   };
   const persist = next => {
     const hasTicket = Boolean(next.tasks[0].intent?.pending?.ticket);
@@ -367,9 +375,11 @@ function restartableDispatch(failure) {
     state: () => durable,
     posts: () => posts,
     showRun: () => { visible = true; },
-    step: async () => advance(durable, await createAdapter({ api, env: fixture.env }), {
-      now: durable.tasks[0].nextActionAt ?? durable.updatedAt, persist
-    })
+    step: async () => {
+      const adapter = await createAdapter({ api, config: fixture.configured, env: fixture.env });
+      adapter.quoteInferenceBudget = () => ({ reservedUsdCents: 10 });
+      return advance(durable, adapter, { now: durable.tasks[0].nextActionAt ?? durable.updatedAt, persist });
+    }
   };
 }
 
@@ -445,6 +455,7 @@ test('dispatch cannot use stale, simulated, expired or substituted task state', 
     ({ task }) => { task.intent = null; },
     ({ task }) => { task.intent.key = 'superseded'; },
     ({ task }) => { task.goal = 'Unapproved replacement goal'; },
+    ({ state }) => { state.budget.reservations = []; },
     ({ inputs }) => { inputs.task = 'other'; },
     ({ inputs }) => { inputs.stage = 'implement'; },
     ({ inputs }) => { inputs.harness = 'b'.repeat(40); },

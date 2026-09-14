@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { INFERENCE_ACTIONS, validateTrustedBudget } from './budget.mjs';
 import { GitHubAPI, GitHubContentsLedger, REPOSITORY } from './github-api.mjs';
 import { resolvePolicy } from './model-policy.mjs';
 
@@ -19,6 +20,7 @@ function assertAppIdentity(config) {
       !Number.isSafeInteger(config.appId) || config.appId < 1) {
     throw new Error('Trusted repository/App identity has not been configured');
   }
+  validateTrustedBudget(config);
 }
 
 export function validateEdits(output, limits = {}) {
@@ -351,6 +353,13 @@ export async function authorizeDispatch(api, inputs, env = process.env) {
       pending.taskId !== inputs.task || pending.workflow !== workflow)) {
     throw new Error('Dispatch disagrees with its persisted workflow ticket');
   }
+  if (INFERENCE_ACTIONS.includes(inputs.stage)) {
+    const reservation = state.budget.reservations.find(item => item.key === task.intent.key);
+    if (!reservation || reservation.status !== 'reserved' || reservation.action !== inputs.stage ||
+        reservation.taskId !== inputs.task || reservation.runId !== state.runId) {
+      throw new Error('Dispatch lacks a durable inference budget reservation');
+    }
+  }
   if (['plan', 'implement'].includes(inputs.stage) &&
       (inputs.head !== current.sha || inputs.base !== current.sha)) throw new Error('Implementation snapshot is not current');
   if (['validate', 'repair'].includes(inputs.stage) &&
@@ -421,7 +430,8 @@ export async function createAdapter(options = {}) {
         ? await adapter.repairApp({ taskId: task.id, key, evidence: context.evidence, edits: result.edits })
         : await adapter.publishApp({ taskId: task.id, key, baseSha: ticket.base, edits: result.edits });
       return pass({ headSha: published.head, baseSha: published.base, prNumber: published.number,
-        branch: published.branch, publishKey: published.publishKey ?? key });
+        branch: published.branch, publishKey: published.publishKey ?? key,
+        inferenceBilling: result.inferenceBilling });
     }
     if (action === 'validate') {
       if (result.ciPassed !== true || result.review?.verdict !== 'PASS') {
@@ -429,11 +439,11 @@ export async function createAdapter(options = {}) {
       }
       return pass({ headSha: ticket.head, testedSha: ticket.head, baseSha: ticket.base,
         ciPassed: true, independentReview: { verdict: 'PASS', independent: true, reviewer: 'Claude Opus 5', audit: result.review.audit },
-        package: result.package });
+        package: result.package, inferenceBilling: result.inferenceBilling ?? result.review.inferenceBilling });
     }
     if (action === 'plan') {
       if (typeof result.plan !== 'string' || !result.plan.trim() || result.plan.length > 16000) throw new Error('Invalid planning output');
-      return pass({ plan: result.plan, baseSha: ticket.base });
+      return pass({ plan: result.plan, baseSha: ticket.base, inferenceBilling: result.inferenceBilling });
     }
     // Public workflow artifacts are not an authenticated private evidence transport.
     if (action === 'deploy') return { verdict: 'INCONCLUSIVE', simulated: false,

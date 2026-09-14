@@ -1,5 +1,9 @@
 import { createHash } from 'node:crypto';
 import { isPrivateDeviceReceipt, validateDeviceReceipt, validateTestedManifest } from './device-bridge.mjs';
+import {
+  BudgetError, INFERENCE_ACTIONS, assertBudgetLedger, createBudgetLedger,
+  reserveInferenceBudget, settleInferenceBudget
+} from './budget.mjs';
 
 export const DEFAULT_LIMITS = Object.freeze({
   experimentMs: 24 * 60 * 60 * 1000,
@@ -93,6 +97,7 @@ export function createState(tasks, { mode = 'mock', now = Date.now(), limits = {
     expiresAt: now + resolvedLimits.experimentMs,
     limits: resolvedLimits,
     actionCount: 0,
+    budget: createBudgetLedger(),
     activeTaskId: null,
     nextWakeAt: null,
     tasks: tasks.map((input) => taskRecord(input, now)),
@@ -116,6 +121,7 @@ export function assertState(state) {
     throw new Error('Invalid durable counters, deadline, or state status');
   }
   if (!Array.isArray(state.tasks) || !state.tasks.length) throw new Error('Invalid backlog');
+  assertBudgetLedger(state.budget);
   const byId = new Map();
   for (const task of state.tasks) {
     if (!ID.test(task.id) || byId.has(task.id) || typeof task.goal !== 'string' || digest(task.goal) !== task.goalHash ||
@@ -444,6 +450,23 @@ export async function advance(input, adapter, { now = Date.now(), persist = asyn
   }
   const intent = task.intent;
   if (intent.action !== action) throw new Error('Intent/stage mismatch');
+  if (state.mode === 'real' && INFERENCE_ACTIONS.includes(action)) {
+    try {
+      const existing = state.budget.reservations.find(item => item.key === intent.key);
+      const quote = existing ? existing : await adapter.quoteInferenceBudget?.(action, freeze(clone(task)), freeze({
+        mode: state.mode, now, runId: state.runId, idempotencyKey: intent.key,
+        attempt: intent.attempt, evidence: clone(task.evidence),
+      }));
+      reserveInferenceBudget(state, adapter.config, {
+        key: intent.key, action, taskId: task.id, runId: state.runId,
+        reservedUsdCents: quote?.reservedUsdCents, now,
+      });
+    } catch (error) {
+      block(task, error instanceof BudgetError ? error.code : 'budget-cost-bound-unavailable', now);
+      settle(state, now);
+      return save();
+    }
+  }
   if (intent.pending && intent.pollCount >= state.limits.maxPolls) {
     block(task, 'poll-limit', now);
     settle(state, now);
@@ -509,6 +532,15 @@ export async function advance(input, adapter, { now = Date.now(), persist = asyn
   } else if (!['PASS', 'FAIL', 'INCONCLUSIVE'].includes(result.verdict)) {
     block(task, 'invalid-verdict', now);
   } else {
+    if (state.mode === 'real' && INFERENCE_ACTIONS.includes(action)) {
+      try {
+        settleInferenceBudget(state, intent.key, result.inferenceBilling, now);
+      } catch (error) {
+        block(task, error instanceof BudgetError ? error.code : 'budget-settlement-unavailable', now);
+        settle(state, now);
+        return save();
+      }
+    }
     if (state.mode === 'real' && ['deploy', 'accept'].includes(action)) {
       if (result.verdict === 'PASS' || isPrivateDeviceReceipt(result)) {
         try {
