@@ -1,4 +1,8 @@
 import { createHash } from 'node:crypto';
+import {
+  INFERENCE_ACTIONS, applyEnvironmentBudget, assertBudgetLedger,
+  quarantineMissingBudgetLedger, validateTrustedBudget
+} from './budget.mjs';
 import { GitHubAPI, GitHubContentsLedger, REPOSITORY } from './github-api.mjs';
 import { resolvePolicy } from './model-policy.mjs';
 
@@ -19,6 +23,7 @@ function assertAppIdentity(config) {
       !Number.isSafeInteger(config.appId) || config.appId < 1) {
     throw new Error('Trusted repository/App identity has not been configured');
   }
+  validateTrustedBudget(config);
 }
 
 export function validateEdits(output, limits = {}) {
@@ -309,6 +314,7 @@ export async function authorizeController(api, env = process.env) {
   assertWorkflowContext(current, 'factory-controller.yml', env);
   const config = await readJSON(api, 'factory/trusted-config.json', current.sha);
   assertAppIdentity(config);
+  const effectiveConfig = applyEnvironmentBudget(config, env);
   if (String(config.appId) !== env.FACTORY_APP_ID ||
       !['schedule', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME) ||
       (env.GITHUB_EVENT_NAME === 'schedule' && env.FACTORY_SCHEDULE_ENABLED !== 'true') ||
@@ -316,7 +322,7 @@ export async function authorizeController(api, env = process.env) {
         (env.GITHUB_ACTOR !== config.owner || env.GITHUB_TRIGGERING_ACTOR !== config.owner))) {
     throw new Error('Only owner dispatch or the opt-in trusted default-branch schedule can run the controller');
   }
-  return { ...current, config };
+  return { ...current, config: effectiveConfig };
 }
 
 export async function authorizeDispatch(api, inputs, env = process.env) {
@@ -350,6 +356,14 @@ export async function authorizeDispatch(api, inputs, env = process.env) {
   if (pending && (['head', 'base', 'harness', 'key', 'stage'].some(field => pending[field] !== inputs[field]) ||
       pending.taskId !== inputs.task || pending.workflow !== workflow)) {
     throw new Error('Dispatch disagrees with its persisted workflow ticket');
+  }
+  if (INFERENCE_ACTIONS.includes(inputs.stage)) {
+    assertBudgetLedger(state.budget);
+    const reservation = state.budget.reservations[task.intent.key];
+    if (!reservation || reservation.status !== 'reserved' || reservation.action !== inputs.stage ||
+        reservation.taskId !== inputs.task || reservation.runId !== state.runId) {
+      throw new Error('Dispatch lacks a durable inference budget reservation');
+    }
   }
   if (['plan', 'implement'].includes(inputs.stage) &&
       (inputs.head !== current.sha || inputs.base !== current.sha)) throw new Error('Implementation snapshot is not current');
@@ -421,7 +435,8 @@ export async function createAdapter(options = {}) {
         ? await adapter.repairApp({ taskId: task.id, key, evidence: context.evidence, edits: result.edits })
         : await adapter.publishApp({ taskId: task.id, key, baseSha: ticket.base, edits: result.edits });
       return pass({ headSha: published.head, baseSha: published.base, prNumber: published.number,
-        branch: published.branch, publishKey: published.publishKey ?? key });
+        branch: published.branch, publishKey: published.publishKey ?? key,
+        inferenceBilling: result.inferenceBilling });
     }
     if (action === 'validate') {
       if (result.ciPassed !== true || result.review?.verdict !== 'PASS') {
@@ -429,11 +444,11 @@ export async function createAdapter(options = {}) {
       }
       return pass({ headSha: ticket.head, testedSha: ticket.head, baseSha: ticket.base,
         ciPassed: true, independentReview: { verdict: 'PASS', independent: true, reviewer: 'Claude Opus 5', audit: result.review.audit },
-        package: result.package });
+        package: result.package, inferenceBilling: result.inferenceBilling ?? result.review.inferenceBilling });
     }
     if (action === 'plan') {
       if (typeof result.plan !== 'string' || !result.plan.trim() || result.plan.length > 16000) throw new Error('Invalid planning output');
-      return pass({ plan: result.plan, baseSha: ticket.base });
+      return pass({ plan: result.plan, baseSha: ticket.base, inferenceBilling: result.inferenceBilling });
     }
     // Public workflow artifacts are not an authenticated private evidence transport.
     if (action === 'deploy') return { verdict: 'INCONCLUSIVE', simulated: false,
@@ -456,6 +471,7 @@ export async function runProduction({ env = process.env, api } = {}) {
     version = next;
   };
   if (!state) state = createState(config.backlog, { mode: 'real' });
+  else if (quarantineMissingBudgetLedger(state, config, Date.now())) await persist(state);
   assertState(state);
   if (state.mode !== 'real') throw new Error('Production ledger cannot contain simulated state');
   if (!isEnabled(config, env)) {

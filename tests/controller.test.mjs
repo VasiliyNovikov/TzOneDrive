@@ -5,6 +5,9 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createState, advance, runLoop } from '../factory/controller.mjs';
+import {
+  applyEnvironmentBudget, budgetVisibility, reserveInferenceBudget, settleInferenceBudget, validateTrustedBudget
+} from '../factory/budget.mjs';
 import { createMockAdapter } from '../factory/main.mjs';
 import { StateLockedError, withStore } from '../factory/store.mjs';
 
@@ -12,6 +15,7 @@ const NOW = 1000000;
 const backlog = [{ id: 'feature', goal: 'Show trusted fixture files on the TV.' }];
 const initial = (limits = {}, mode = 'mock') => createState(backlog, { now: NOW, mode, limits });
 const drive = (state, adapter, extra = {}) => runLoop(state, adapter, { now: NOW, virtualTime: state.mode === 'mock', ...extra });
+const budgetConfig = cap => ({ inferenceBudget: { cumulativeCapUsdCents: cap } });
 
 async function fixture(t) {
   const directory = resolve('.factory-local', `test-${randomUUID()}`);
@@ -34,6 +38,75 @@ test('trusted goals, IDs, dependency graph, and modes are validated', async () =
   const corruptCounter = initial();
   corruptCounter.actionCount = null;
   await assert.rejects(advance(corruptCounter, {}), /Invalid durable counters/);
+});
+
+test('trusted inference budget config uses integer cumulative USD cents', () => {
+  assert.deepEqual(validateTrustedBudget(budgetConfig(500000)), { cumulativeCapUsdCents: 500000 });
+  assert.equal(applyEnvironmentBudget(budgetConfig(500000),
+    { FACTORY_BUDGET_USD_CENTS: '750000' }).inferenceBudget.cumulativeCapUsdCents, 750000);
+  assert.equal(applyEnvironmentBudget(budgetConfig(500000), {}).inferenceBudget.cumulativeCapUsdCents, 500000);
+  for (const inferenceBudget of [
+    undefined, {}, { cumulativeCapUsdCents: 1.5 }, { cumulativeCapUsdCents: -1 },
+    { cumulativeCapUsdCents: 500000, resetsMonthly: true }
+  ]) {
+    assert.throws(() => validateTrustedBudget({ inferenceBudget }), /cumulativeCapUsdCents|trusted config/);
+  }
+  for (const value of ['5000.00', '-1', ' 500000', '1e6', '9007199254740992']) {
+    assert.throws(() => applyEnvironmentBudget(budgetConfig(500000),
+      { FACTORY_BUDGET_USD_CENTS: value }), /FACTORY_BUDGET_USD_CENTS/);
+  }
+});
+
+test('inference budget is cumulative across run IDs and cap changes do not reset accounting', () => {
+  const state = initial({}, 'real');
+  const first = { key: 'first', action: 'plan', taskId: 'feature', runId: 'run-a', reservedUsdCents: 300, now: NOW };
+  reserveInferenceBudget(state, budgetConfig(500), first);
+  settleInferenceBudget(state, first.key, { settlementKey: 'receipt-a', costUsdCents: 300, source: 'trusted-test' }, NOW + 1);
+  assert.equal(state.budget.cumulativeSpendUsdCents, 300);
+
+  reserveInferenceBudget(state, budgetConfig(1000),
+    { key: 'second', action: 'plan', taskId: 'feature', runId: 'run-b', reservedUsdCents: 600, now: NOW + 2 });
+  assert.equal(budgetVisibility(state.budget, budgetConfig(1000)).availableUsdCents, 100);
+  assert.throws(() => reserveInferenceBudget(state, budgetConfig(800),
+    { key: 'third', action: 'plan', taskId: 'feature', runId: 'run-c', reservedUsdCents: 1, now: NOW + 3 }), /exhausted/);
+  assert.equal(state.budget.cumulativeSpendUsdCents, 300);
+});
+
+test('inference budget enforces exact cap boundary and concurrent reservations', () => {
+  const state = initial({}, 'real');
+  reserveInferenceBudget(state, budgetConfig(100),
+    { key: 'a', action: 'plan', taskId: 'feature', runId: 'run', reservedUsdCents: 60, now: NOW });
+  assert.throws(() => reserveInferenceBudget(state, budgetConfig(100),
+    { key: 'b', action: 'implement', taskId: 'feature', runId: 'run', reservedUsdCents: 50, now: NOW }), /exhausted/);
+  settleInferenceBudget(state, 'a', { settlementKey: 'settle-a', costUsdCents: 20, source: 'trusted-test' }, NOW + 1);
+  reserveInferenceBudget(state, budgetConfig(100),
+    { key: 'b', action: 'implement', taskId: 'feature', runId: 'run', reservedUsdCents: 50, now: NOW + 2 });
+  reserveInferenceBudget(state, budgetConfig(100),
+    { key: 'c', action: 'validate', taskId: 'feature', runId: 'run', reservedUsdCents: 30, now: NOW + 3 });
+  assert.equal(budgetVisibility(state.budget, budgetConfig(100)).availableUsdCents, 0);
+});
+
+test('inference budget settlement is idempotent and unknown costs stay unresolved', () => {
+  const state = initial({}, 'real');
+  reserveInferenceBudget(state, budgetConfig(1000),
+    { key: 'known', action: 'repair', taskId: 'feature', runId: 'run', reservedUsdCents: 100, now: NOW });
+  settleInferenceBudget(state, 'known', { settlementKey: 'same-receipt', costUsdCents: 25, source: 'trusted-test' }, NOW + 1);
+  settleInferenceBudget(state, 'known', { settlementKey: 'same-receipt', costUsdCents: 25, source: 'trusted-test' }, NOW + 2);
+  assert.equal(state.budget.cumulativeSpendUsdCents, 25);
+  assert.throws(() => settleInferenceBudget(state, 'known', null, NOW + 3), /mismatch/);
+  assert.throws(() => settleInferenceBudget(state, 'known',
+    { settlementKey: 'different-receipt', costUsdCents: 25, source: 'trusted-test' }, NOW + 3), /mismatch/);
+
+  reserveInferenceBudget(state, budgetConfig(1000),
+    { key: 'unknown', action: 'validate', taskId: 'feature', runId: 'run', reservedUsdCents: 200, now: NOW + 4 });
+  assert.throws(() => settleInferenceBudget(state, 'unknown', null, NOW + 5), /usage\/cost/);
+  assert.equal(state.budget.reservations.unknown.status, 'unresolved');
+  assert.throws(() => reserveInferenceBudget(state, budgetConfig(1000),
+    { key: 'unknown', action: 'validate', taskId: 'feature', runId: 'run', reservedUsdCents: 1, now: NOW + 6 }),
+  /not available/);
+  assert.throws(() => settleInferenceBudget(state, 'unknown',
+    { settlementKey: 'late-cost', costUsdCents: 1, source: 'trusted-test' }, NOW + 7), /unresolved/);
+  assert.equal(budgetVisibility(state.budget, budgetConfig(1000)).unresolvedUsdCents, 200);
 });
 
 test('mock completes the full lifecycle; completed state dispatches nothing on resume', async () => {
@@ -78,6 +151,40 @@ test('intent is persisted before side effect; receipt is persisted afterwards', 
   assert.equal(checkpoints.length, 2);
   assert.equal(result.tasks[0].intent, null);
   assert.equal(result.tasks[0].evidence.plan.verdict, 'PASS');
+});
+
+test('real inference requires a pre-call budget reservation and settled trustworthy cost', async () => {
+  let executed = false;
+  let state = await advance(initial({}, 'real'), {
+    config: budgetConfig(500000),
+    execute() { executed = true; },
+  }, { now: NOW });
+  assert.equal(executed, false);
+  assert.equal(state.status, 'blocked');
+  assert.equal(state.tasks[0].blockedReason, 'budget-cost-bound-unavailable');
+
+  state = await advance(initial({}, 'real'), {
+    config: budgetConfig(500000),
+    quoteInferenceBudget() { return { reservedUsdCents: 100 }; },
+    execute() { return { simulated: false, verdict: 'PASS', plan: 'billable plan without cost' }; },
+  }, { now: NOW });
+  assert.equal(state.status, 'blocked');
+  assert.equal(state.tasks[0].blockedReason, 'budget-settlement-unavailable');
+  assert.equal(Object.values(state.budget.reservations)[0].status, 'unresolved');
+
+  state = await advance(initial({}, 'real'), {
+    config: budgetConfig(500000),
+    quoteInferenceBudget() { return { reservedUsdCents: 100 }; },
+    execute() {
+      return {
+        simulated: false, verdict: 'PASS', plan: 'billable plan',
+        inferenceBilling: { settlementKey: 'call-1', costUsdCents: 75, source: 'trusted-test' }
+      };
+    },
+  }, { now: NOW });
+  assert.equal(state.tasks[0].stage, 'implement');
+  assert.equal(state.budget.cumulativeSpendUsdCents, 75);
+  assert.equal(Object.values(state.budget.reservations)[0].status, 'settled');
 });
 
 test('a failure saving intent prevents the side effect', async () => {
@@ -175,7 +282,18 @@ test('crash between effect and receipt resumes the same key without duplicate ef
 });
 
 test('mock receipts cannot advance a real run or become physical delivery', async () => {
-  const result = await drive(initial({}, 'real'), await createMockAdapter());
+  const mock = await createMockAdapter();
+  const result = await drive(initial({}, 'real'), {
+    config: budgetConfig(500000),
+    quoteInferenceBudget() { return { reservedUsdCents: 100 }; },
+    async execute(action, task, context) {
+      const receipt = await mock.execute(action, task, context);
+      if (['plan', 'implement', 'repair', 'validate'].includes(action)) {
+        receipt.inferenceBilling = { settlementKey: context.idempotencyKey, costUsdCents: 1, source: 'trusted-test' };
+      }
+      return receipt;
+    },
+  });
   assert.equal(result.status, 'blocked');
   assert.equal(result.tasks[0].blockedReason, 'simulated-evidence-mode-mismatch');
   assert.equal(result.tasks[0].evidence.merge, undefined);

@@ -17,7 +17,8 @@ import {
 const sha = 'a'.repeat(40);
 const config = {
   repository: 'VasiliyNovikov/TzOneDrive', owner: 'VasiliyNovikov',
-  appBotLogin: 'fixture-factory[bot]', appId: 123
+  appBotLogin: 'fixture-factory[bot]', appId: 123,
+  inferenceBudget: { cumulativeCapUsdCents: 500000 }
 };
 const jsonFile = value => ({
   encoding: 'base64', size: 100, content: Buffer.from(JSON.stringify(value)).toString('base64')
@@ -225,12 +226,20 @@ function dispatchFixture(stage = 'plan') {
     head: ['validate', 'repair'].includes(stage) ? candidate : sha, base: sha, harness: sha
   };
   const workflow = stage === 'deploy' ? 'factory-device.yml' : 'factory-worker.yml';
+  if (['plan', 'implement', 'repair', 'validate'].includes(stage)) {
+    state.budget.reservations[task.intent.key] = {
+      key: task.intent.key, action: stage, taskId: task.id, runId: state.runId,
+      reservedUsdCents: 1000, status: 'reserved', createdAt: Date.now(),
+    };
+    state.budget.reservedUsdCents = 1000;
+  }
   const env = {
     GITHUB_REPOSITORY: config.repository, GITHUB_EVENT_NAME: 'workflow_dispatch',
     GITHUB_REF: 'refs/heads/master', GITHUB_SHA: sha,
     GITHUB_WORKFLOW_REF: `${config.repository}/.github/workflows/${workflow}@refs/heads/master`,
     GITHUB_ACTOR: config.appBotLogin, GITHUB_TRIGGERING_ACTOR: config.appBotLogin,
     FACTORY_ENABLED: 'true', FACTORY_STOP: 'false', FACTORY_APP_ID: String(config.appId),
+    FACTORY_BUDGET_USD_CENTS: String(config.inferenceBudget.cumulativeCapUsdCents),
     ...Object.fromEntries(Object.entries(inputs).map(([key, value]) => [`FACTORY_${key.toUpperCase()}`, value]))
   };
   const pr = { number: 42, merged: true, merge_commit_sha: sha, body: marker(task.id, 'publish-key'),
@@ -349,7 +358,8 @@ function restartableDispatch(failure) {
         path: '.github/workflows/factory-worker.yml', status: 'completed', conclusion: 'success'
       }];
     },
-    downloadResult: async () => ({ ...ticket(), plan: 'Recovered trusted plan' })
+    downloadResult: async () => ({ ...ticket(), plan: 'Recovered trusted plan',
+      inferenceBilling: { settlementKey: ticket().key, costUsdCents: 1, source: 'trusted-test' } })
   };
   const persist = next => {
     const hasTicket = Boolean(next.tasks[0].intent?.pending?.ticket);
@@ -367,9 +377,11 @@ function restartableDispatch(failure) {
     state: () => durable,
     posts: () => posts,
     showRun: () => { visible = true; },
-    step: async () => advance(durable, await createAdapter({ api, env: fixture.env }), {
-      now: durable.tasks[0].nextActionAt ?? durable.updatedAt, persist
-    })
+    step: async () => {
+      const adapter = await createAdapter({ api, config: fixture.configured, env: fixture.env });
+      adapter.quoteInferenceBudget = () => ({ reservedUsdCents: 10 });
+      return advance(durable, adapter, { now: durable.tasks[0].nextActionAt ?? durable.updatedAt, persist });
+    }
   };
 }
 
@@ -445,6 +457,7 @@ test('dispatch cannot use stale, simulated, expired or substituted task state', 
     ({ task }) => { task.intent = null; },
     ({ task }) => { task.intent.key = 'superseded'; },
     ({ task }) => { task.goal = 'Unapproved replacement goal'; },
+    ({ state }) => { state.budget.reservations = {}; state.budget.reservedUsdCents = 0; },
     ({ inputs }) => { inputs.task = 'other'; },
     ({ inputs }) => { inputs.stage = 'implement'; },
     ({ inputs }) => { inputs.harness = 'b'.repeat(40); },
@@ -509,10 +522,12 @@ function controllerFixture() {
 
 test('controller authorizes only the current owner harness or explicitly opted-in schedule', async () => {
   const { api, env } = controllerFixture();
-  await authorizeController(api, env);
+  const authorized = await authorizeController(api, { ...env, FACTORY_BUDGET_USD_CENTS: '750000' });
+  assert.equal(authorized.config.inferenceBudget.cumulativeCapUsdCents, 750000);
   await assert.rejects(authorizeController(api, { ...env, GITHUB_ACTOR: config.appBotLogin }), /Only owner/);
   await assert.rejects(authorizeController(api, { ...env, GITHUB_TRIGGERING_ACTOR: 'other' }), /Only owner/);
   await assert.rejects(authorizeController(api, { ...env, GITHUB_SHA: 'c'.repeat(40) }), /harness/);
+  await assert.rejects(authorizeController(api, { ...env, FACTORY_BUDGET_USD_CENTS: '5000.00' }), /FACTORY_BUDGET_USD_CENTS/);
   const schedule = { ...env, GITHUB_EVENT_NAME: 'schedule' };
   await assert.rejects(authorizeController(api, schedule), /opt-in/);
   await authorizeController(api, { ...schedule, FACTORY_SCHEDULE_ENABLED: 'true' });
@@ -527,6 +542,13 @@ test('production persists stopped or model-blocked state without any remote work
   assert.equal(stoppedState.status, 'stopped');
   assert.equal(stopped.writes.length, 1);
   assert.equal(JSON.parse(Buffer.from(stopped.writes[0].body.content, 'base64')).status, 'stopped');
+
+  const legacy = controllerFixture();
+  legacy.configured.enabled = false;
+  delete legacy.state.budget;
+  const legacyState = await runProduction({ api: legacy.api, env: legacy.env });
+  assert.equal(legacyState.budget.unresolvedUsdCents, config.inferenceBudget.cumulativeCapUsdCents);
+  assert.equal(legacyState.budget.reservations['pre-budget-ledger'].reason, 'pre-budget-accounting-missing');
 
   const blocked = controllerFixture();
   const blockedState = await runProduction({ api: blocked.api, env: blocked.env });
@@ -652,6 +674,7 @@ test('workflow credential boundaries keep controller, browser, inference and LAN
   assert.match(controller, /FACTORY_SCHEDULE_ENABLED == 'true'/);
   assert.match(controller, /environment: factory-control/);
   assert.match(controller, /repositories: TzOneDrive/);
+  assert.match(controller, /FACTORY_BUDGET_USD_CENTS: \$\{\{ secrets\.FACTORY_BUDGET_USD_CENTS \}\}/);
   assert.doesNotMatch(controller, /^\s+run:.*(?:npm|playwright|worker\.mjs|app\/)/m);
   assert.doesNotMatch(controller, /COPILOT_GITHUB_TOKEN|permission-workflows:/);
   assert.doesNotMatch(worker + device, /FACTORY_APP_PRIVATE_KEY|FACTORY_GITHUB_TOKEN|permission-[\w-]+: write/);

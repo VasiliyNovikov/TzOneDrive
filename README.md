@@ -389,7 +389,32 @@ Configure credentials only after reviewing the default-branch harness:
 | `FACTORY_SCHEDULE_ENABLED` | Repository variable; separate opt-in for the five-minute controller schedule |
 | `FACTORY_APP_ID` | Repository variable matching the dedicated App ID in trusted config; configure its exact `appBotLogin` too |
 | `FACTORY_APP_PRIVATE_KEY` | Secret in the default-branch-restricted `factory-control` environment only; token requests are limited to this repository and Actions, Contents and Pull requests write permissions |
+| `FACTORY_BUDGET_USD_CENTS` | Secret in the default-branch-restricted `factory-control` environment only; integer USD cents for the cumulative inference cap |
 | `COPILOT_GITHUB_TOKEN` | Secret in the default-branch-restricted `factory-inference` environment only; dedicated scope-reviewed inference credential, never repository-write authentication |
+
+The trusted configuration includes one documented fallback cumulative inference cap:
+`factory/trusted-config.json` → `inferenceBudget.cumulativeCapUsdCents`.
+The value is an integer number of **USD cents**; the default bootstrap cap is
+`500000` cents (**USD 5,000**) for the entire browser-preview bootstrap effort
+tracked in [issue #5](https://github.com/VasiliyNovikov/TzOneDrive/issues/5).
+It is not per run and does not reset monthly. In production, the controller
+consumes the protected `factory-control` environment secret
+`FACTORY_BUDGET_USD_CENTS` when present. To change the cap later, update that
+single environment secret to an integer cents value, for example `750000` for
+USD 7,500 or `250000` for USD 2,500; do not edit code, issues, prompts, model
+output, run IDs, or ledger state to grant budget authority. Raising or lowering
+the cap never resets the durable ledger accounting.
+
+The durable `factory-ledger` branch records `budget.cumulativeSpendUsdCents`
+and each in-flight, settled, or unresolved reservation. Lowering the cap below
+already settled spend plus outstanding reservations blocks new inference; it
+does not undo prior charges or clear reservations. Missing, corrupt, duplicate
+or unpriced accounting fails closed. Current code implements the cumulative
+reservation/settlement gate, but live factory inference remains blocked until a
+trusted cost source can supply an enforceable per-call upper bound before each
+billable operation and a trustworthy settlement afterward. This repository gate
+does not change GitHub account or organization billing settings and does not
+cover costs outside factory inference.
 
 Workers use only read-only `GITHUB_TOKEN` access to verify repository state.
 Checkout credentials are not persisted; controller jobs do not run app code,

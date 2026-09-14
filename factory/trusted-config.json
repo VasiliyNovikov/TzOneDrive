@@ -7,6 +7,9 @@
   "ledgerBranch": "factory-ledger",
   "appBotLogin": "tzonedrivefactory[bot]",
   "appId": 4941551,
+  "inferenceBudget": {
+    "cumulativeCapUsdCents": 500000
+  },
   "workflows": {
     "worker": "factory-worker.yml",
     "device": "factory-device.yml"
