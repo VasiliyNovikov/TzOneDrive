@@ -38,7 +38,7 @@ export function buildModule(identity) {
 
 export function stampIndex(source, identity) {
   return source.replace('data-build-commit="UNSTAMPED"', `data-build-commit="${identity.commit}"`)
-    .replace('SOURCE · UNSTAMPED', `v${identity.version} · ${identity.commit.slice(0, 12)}`);
+    .replace('SOURCE · UNSTAMPED', `v${identity.version} · ${identity.commit}`);
 }
 
 async function listFiles(directory, prefix = '') {

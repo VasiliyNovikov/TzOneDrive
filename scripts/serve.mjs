@@ -44,7 +44,7 @@ export async function createAppServer({ appRoot = path.join(projectRoot, 'app'),
     const relative = safePath(request.url || '/');
     if (!relative) { send(403, 'Forbidden'); return; }
     const resolved = path.resolve(root, relative);
-    if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) {
+    if (!resolved.startsWith(`${root}${path.sep}`)) {
       send(403, 'Forbidden');
       return;
     }

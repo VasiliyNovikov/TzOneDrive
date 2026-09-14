@@ -24,7 +24,7 @@ test('startup shows complete build/device identity and records keyboard and Tize
   await expect(page.locator('.runtime-row')).toContainText('Chrome/');
   const commit = await page.locator('#diagnostic-commit').innerText();
   await expect(page.locator('#build-mark')).toHaveAttribute('data-build-commit', commit);
-  await expect(page.locator('#build-mark')).toContainText(commit.slice(0, 12));
+  await expect(page.locator('#build-mark')).toContainText(commit);
   await page.keyboard.press('ArrowRight');
   await expect(page.locator('#diagnostic-key')).toContainText('ArrowRight');
   await expect(page.getByRole('button', { name: 'About sign-in' })).toBeFocused();
@@ -37,6 +37,36 @@ test('startup shows complete build/device identity and records keyboard and Tize
   await expect(page.locator('#diagnostic-key')).toContainText('i');
   expect(errors).toEqual([]);
   expect(remoteRequests).toEqual([]);
+});
+
+test('fresh camera challenges stay visible without moving focus or restarting the slideshow', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/');
+  const commit = await page.locator('#diagnostic-commit').innerText();
+  await page.keyboard.type('000123');
+  await expect(page.locator('#camera-challenge')).toHaveText('000123');
+  await expect(page.getByRole('button', { name: 'Explore collections' })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('[data-focus-id="folder-coastal-quiet"]')).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('[data-focus-id="photo-coast"]')).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('[data-focus-id="photo-stage"]')).toBeFocused();
+  await page.keyboard.press('Enter');
+  await page.clock.fastForward(3000);
+  await page.evaluate(() => {
+    for (const digit of '987654') {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Unidentified', keyCode: 48 + Number(digit) }));
+    }
+  });
+  await expect(page.locator('#camera-challenge')).toHaveText('987654');
+  await expect(page.locator('#build-mark')).toContainText(commit);
+  await expect(page.locator('#build-mark')).toBeInViewport();
+  await expect(page.locator('[data-focus-id="photo-stage"]')).toBeFocused();
+  await page.clock.fastForward(2100);
+  await expect(page.getByRole('heading', { name: 'A softer horizon' })).toBeVisible();
+  await expect(page.locator('#slideshow-status')).toHaveText('Slideshow playing');
+  await expect(page.locator('#camera-challenge')).toHaveText('987654');
 });
 
 test('arrows, Enter and Back navigate grids with exact folder and photo focus restoration', async ({ page }) => {

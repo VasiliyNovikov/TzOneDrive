@@ -13,6 +13,14 @@ export const assertIdentifier = value => {
   return value;
 };
 
+function assertAppIdentity(config) {
+  if (config?.repository !== REPOSITORY || config.owner !== 'VasiliyNovikov' ||
+      !/^[a-zA-Z0-9_-]+\[bot\]$/.test(config.appBotLogin || '') ||
+      !Number.isSafeInteger(config.appId) || config.appId < 1) {
+    throw new Error('Trusted repository/App identity has not been configured');
+  }
+}
+
 export function validateEdits(output, limits = {}) {
   const bounds = {
     maxFiles: Math.min(limits.maxFiles ?? 20, 20),
@@ -117,11 +125,7 @@ export class GitHubAdapter {
   async trustedContext() {
     const head = await defaultHead(this.api);
     const config = await readJSON(this.api, 'factory/trusted-config.json', head.sha);
-    if (config.repository !== REPOSITORY || config.owner !== 'VasiliyNovikov' ||
-        !/^[a-zA-Z0-9_-]+\[bot\]$/.test(config.appBotLogin || '') ||
-        !Number.isSafeInteger(config.appId) || config.appId < 1) {
-      throw new Error('Trusted repository/App identity has not been configured');
-    }
+    assertAppIdentity(config);
     return { ...head, config };
   }
 
@@ -285,17 +289,49 @@ export function isEnabled(config, env = process.env) {
     env.FACTORY_ENABLED === 'true' && env.FACTORY_STOP !== 'true';
 }
 
+function assertWorkflowContext(current, workflow, env) {
+  if (env.GITHUB_REPOSITORY !== REPOSITORY || env.GITHUB_SHA !== current.sha ||
+      env.GITHUB_REF !== `refs/heads/${current.branch}` ||
+      env.GITHUB_WORKFLOW_REF !== `${REPOSITORY}/.github/workflows/${workflow}@refs/heads/${current.branch}`) {
+    throw new Error('Workflow must execute the current trusted default-branch harness');
+  }
+}
+
+export async function authorizeController(api, env = process.env) {
+  const current = await defaultHead(api);
+  assertWorkflowContext(current, 'factory-controller.yml', env);
+  const config = await readJSON(api, 'factory/trusted-config.json', current.sha);
+  assertAppIdentity(config);
+  if (String(config.appId) !== env.FACTORY_APP_ID ||
+      !['schedule', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME) ||
+      (env.GITHUB_EVENT_NAME === 'schedule' && env.FACTORY_SCHEDULE_ENABLED !== 'true') ||
+      (env.GITHUB_EVENT_NAME === 'workflow_dispatch' &&
+        (env.GITHUB_ACTOR !== config.owner || env.GITHUB_TRIGGERING_ACTOR !== config.owner))) {
+    throw new Error('Only owner dispatch or the opt-in trusted default-branch schedule can run the controller');
+  }
+  return { ...current, config };
+}
+
 export async function authorizeDispatch(api, inputs, env = process.env) {
+  if (!inputs || Object.keys(inputs).sort().join(',') !== 'base,harness,head,key,stage,task') {
+    throw new Error('Dispatch requires exactly task/stage/key/head/base/harness');
+  }
   for (const value of [inputs.head, inputs.base, inputs.harness]) assertSha(value);
   correlation(inputs.task, inputs.stage, inputs.key);
   const current = await defaultHead(api);
-  if (current.sha !== inputs.harness || env.GITHUB_EVENT_NAME !== 'workflow_dispatch' ||
-      env.GITHUB_REF !== `refs/heads/${current.branch}`) throw new Error('Dispatch must use the current trusted default branch');
+  const workflow = inputs.stage === 'deploy' ? 'factory-device.yml' : 'factory-worker.yml';
+  assertWorkflowContext(current, workflow, env);
+  if (current.sha !== inputs.harness || env.GITHUB_EVENT_NAME !== 'workflow_dispatch') {
+    throw new Error('Dispatch must use the current trusted default branch');
+  }
   const config = await readJSON(api, 'factory/trusted-config.json', current.sha);
-  if (!isEnabled(config, env) || config.repository !== REPOSITORY ||
-      !config.appBotLogin || env.GITHUB_ACTOR !== config.appBotLogin ||
+  assertAppIdentity(config);
+  if (!isEnabled(config, env) || env.GITHUB_ACTOR !== config.appBotLogin ||
+      env.GITHUB_TRIGGERING_ACTOR !== config.appBotLogin ||
       String(config.appId) !== env.FACTORY_APP_ID) throw new Error('Dispatch is stopped or not authorized by the installed App');
   const { state } = await new GitHubContentsLedger(api).read();
+  const { assertState } = await import('./controller.mjs');
+  assertState(state);
   const task = state?.tasks?.find(item => item.id === inputs.task);
   if (state?.mode !== 'real' || state.simulated !== false || state.activeTaskId !== inputs.task ||
       !['running', 'waiting'].includes(state.status) || !['running', 'waiting'].includes(task?.status) ||
@@ -304,7 +340,8 @@ export async function authorizeDispatch(api, inputs, env = process.env) {
     throw new Error('Dispatch does not match the current durable task intent');
   }
   const pending = task.intent.pending?.ticket;
-  if (pending && ['head', 'base', 'harness', 'key'].some(field => pending[field] !== inputs[field])) {
+  if (pending && (['head', 'base', 'harness', 'key', 'stage'].some(field => pending[field] !== inputs[field]) ||
+      pending.taskId !== inputs.task || pending.workflow !== workflow)) {
     throw new Error('Dispatch disagrees with its persisted workflow ticket');
   }
   if (['plan', 'implement'].includes(inputs.stage) &&
@@ -325,7 +362,7 @@ export async function authorizeDispatch(api, inputs, env = process.env) {
   } else if (!['plan', 'implement', 'repair', 'validate'].includes(inputs.stage)) {
     throw new Error('Unsupported dispatch stage');
   }
-  return { task, state, config, ...inputs };
+  return { ...inputs, task, state, config };
 }
 
 export async function createAdapter(options = {}) {
@@ -392,13 +429,8 @@ export async function createAdapter(options = {}) {
 export async function runProduction({ env = process.env, api } = {}) {
   const { createState, assertState, runLoop } = await import('./controller.mjs');
   api ??= new GitHubAPI({ token: env.FACTORY_GITHUB_TOKEN });
-  const current = await defaultHead(api);
-  const config = await readJSON(api, 'factory/trusted-config.json', current.sha);
-  if (env.GITHUB_REPOSITORY !== REPOSITORY || env.GITHUB_REF !== `refs/heads/${current.branch}` ||
-      !['schedule', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME) ||
-      (env.GITHUB_EVENT_NAME === 'workflow_dispatch' && env.GITHUB_ACTOR !== config.owner)) {
-    throw new Error('Only owner dispatch or the trusted default-branch schedule can run the controller');
-  }
+  const current = await authorizeController(api, env);
+  const { config } = current;
   const ledger = new GitHubContentsLedger(api);
   let { version, state } = await ledger.read();
   const persist = async value => {

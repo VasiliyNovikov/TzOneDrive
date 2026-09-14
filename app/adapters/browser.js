@@ -1,4 +1,7 @@
 export function normalizeKey(event) {
+  if (/^[0-9]$/.test(event.key)) return `digit-${event.key}`;
+  if (event.keyCode >= 48 && event.keyCode <= 57) return `digit-${event.keyCode - 48}`;
+  if (event.keyCode >= 96 && event.keyCode <= 105) return `digit-${event.keyCode - 96}`;
   const names = {
     ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down',
     Enter: 'select', Escape: 'back', Backspace: 'back', BrowserBack: 'back',
@@ -23,7 +26,8 @@ export function createBrowserAdapter(target = window) {
         const command = normalizeKey(event);
         const label = `${event.key || 'Unnamed'} · ${event.keyCode || event.code || '—'}`;
         if (command) event.preventDefault();
-        if (event.repeat && ['select', 'back', 'playpause', 'diagnostics'].includes(command)) return;
+        if (event.repeat && (['select', 'back', 'playpause', 'diagnostics'].includes(command)
+          || command?.startsWith('digit-'))) return;
         onInput({ command, label });
       };
       target.addEventListener('keydown', handler);

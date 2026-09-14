@@ -98,12 +98,12 @@ export function createRealAdapters(config, { command = runCommand, jsonCommand =
     if (!visual || typeof visual.policyPath !== 'string' || typeof visual.catalogPath !== 'string') {
       throw new AdapterError('INFERENCE_UNAVAILABLE', 'An owner-approved visual model policy and reviewed catalog are required');
     }
-    const adapter = {
+    return {
       cwd: root, policyPath: visual.policyPath, catalogPath: visual.catalogPath,
       cliPath: trustedExecutable(visual.cliPath),
     };
   };
-  return {
+  const adapter = {
     mode: 'real',
     synthetic: false,
     diagnostics: async ({ signal } = {}) => {

@@ -12,6 +12,7 @@ export function initialState() {
     loading: true,
     error: null,
     lastKey: 'No input yet',
+    cameraChallenge: '',
   };
 }
 
@@ -19,6 +20,9 @@ export function reduce(state, action) {
   switch (action.type) {
     case 'KEY':
       return { ...state, lastKey: String(action.label).slice(0, 100) };
+    case 'CHALLENGE_DIGIT':
+      if (typeof action.digit !== 'string' || !/^[0-9]$/.test(action.digit)) return state;
+      return { ...state, cameraChallenge: (state.cameraChallenge + action.digit).slice(-6) };
     case 'FOLDERS_LOADED':
       return { ...state, folders: action.folders, loading: false, error: null };
     case 'OPEN_FOLDER':

@@ -24,6 +24,7 @@ function updateDiagnostics() {
   renderer.updateDiagnostics(state, images.stats(), {
     width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio,
   });
+  document.querySelector('#camera-challenge').textContent = state.cameraChallenge.padStart(6, '-');
 }
 
 function loadImages() {
@@ -74,7 +75,7 @@ function dispatch(action) {
   const next = reduce(state, action);
   if (next === state) return;
   state = next;
-  if (action.type === 'KEY') {
+  if (action.type === 'KEY' || action.type === 'CHALLENGE_DIGIT') {
     updateDiagnostics();
     return;
   }
@@ -136,7 +137,9 @@ root.addEventListener('focusin', () => focus.capture());
 
 const unsubscribe = adapter.subscribe(({ command, label }) => {
   dispatch({ type: 'KEY', label });
-  if (['left', 'right', 'up', 'down'].includes(command)) {
+  if (command?.startsWith('digit-')) {
+    dispatch({ type: 'CHALLENGE_DIGIT', digit: command.slice(-1) });
+  } else if (['left', 'right', 'up', 'down'].includes(command)) {
     if (state.screen === 'photo' && ['left', 'right'].includes(command)
       && document.activeElement.dataset.focusId === 'photo-stage') {
       dispatch({ type: 'STEP', delta: command === 'right' ? 1 : -1 });

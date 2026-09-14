@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { initialState, reduce, focusContext } from '../app/state.js';
 import { createFixtureProvider } from '../app/providers/fixtures.js';
 import { directionalTarget, FocusController } from '../app/focus.js';
@@ -211,6 +213,9 @@ test('browser and Tizen adapters normalize keys and safely handle missing option
   assert.equal(normalizeKey({ keyCode: 10252 }), 'playpause');
   assert.equal(normalizeKey({ key: 'i' }), 'diagnostics');
   assert.equal(normalizeKey({ key: 'F12' }), null);
+  assert.equal(normalizeKey({ key: '0' }), 'digit-0');
+  assert.equal(normalizeKey({ key: 'Unidentified', keyCode: 57 }), 'digit-9');
+  assert.equal(normalizeKey({ keyCode: 96 }), 'digit-0');
   const events = {};
   const target = {
     addEventListener: (name, handler) => { events[name] = handler; },
@@ -223,11 +228,23 @@ test('browser and Tizen adapters normalize keys and safely handle missing option
   let prevented = false;
   events.keydown({ key: 'Enter', preventDefault() { prevented = true; } });
   events.keydown({ key: 'Enter', repeat: true, preventDefault() {} });
+  events.keydown({ key: '0', repeat: true, preventDefault() {} });
   assert.equal(prevented, true);
   assert.equal(received.length, 1);
   unsubscribe();
   assert.equal(events.keydown, undefined);
-  assert.equal(createTizenAdapter(target).warnings.length, 5);
+  assert.equal(createTizenAdapter(target).warnings.length, 15);
+});
+
+test('camera challenge retains exactly six digits without changing navigation or playback', () => {
+  let state = { ...initialState(), screen: 'photo', playing: true };
+  for (const digit of '123456000007') state = reduce(state, { type: 'CHALLENGE_DIGIT', digit });
+  assert.equal(state.cameraChallenge, '000007');
+  assert.equal(state.screen, 'photo');
+  assert.equal(state.playing, true);
+  for (const digit of ['', '12', '<', null, 0]) {
+    assert.equal(reduce(state, { type: 'CHALLENGE_DIGIT', digit }), state);
+  }
 });
 
 test('build identity requires a full SHA and stamps an independent camera mark', async () => {
@@ -238,7 +255,7 @@ test('build identity requires a full SHA and stamps an independent camera mark',
   const source = '<aside data-build-commit="UNSTAMPED">SOURCE · UNSTAMPED</aside>';
   const stamped = stampIndex(source, identity);
   assert.match(stamped, new RegExp(`data-build-commit="${identity.commit}"`));
-  assert.ok(stamped.includes(`v${identity.version} · ${'a'.repeat(12)}`));
+  assert.ok(stamped.includes(`v${identity.version} · ${identity.commit}`));
 });
 
 test('server path parsing rejects traversal, encoded separators, dotfiles, and malformed requests', () => {
@@ -247,6 +264,40 @@ test('server path parsing rejects traversal, encoded separators, dotfiles, and m
   for (const url of ['/../package.json', '/%2e%2e/package.json', '/%2e%2e%2fpackage.json',
     '/.git/config', '/%00', '/%zz', '/assets\\..\\package.json', '/assets/%2e/secret']) {
     assert.equal(safePath(url), null, url);
+  }
+});
+
+test('static server rejects the root itself and symlinks outside its exact asset directory', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'tzonedrive-server-'));
+  let server;
+  t.after(async () => {
+    if (server) await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  });
+  const root = path.join(directory, 'app');
+  const outside = path.join(directory, 'app-other');
+  await mkdir(root);
+  await mkdir(outside);
+  await writeFile(path.join(root, 'build.json'), JSON.stringify({
+    commit: 'a'.repeat(40), buildId: 'a'.repeat(40), version: '1.0.0', mode: 'development',
+  }));
+  await writeFile(path.join(outside, 'fixture.json'), '{"outside":true}');
+  await symlink(path.join(outside, 'fixture.json'), path.join(root, 'linked.json'));
+  await symlink(outside, path.join(root, 'linked-directory'));
+  server = await createAppServer({ appRoot: root });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  for (const url of ['/linked.json', '/linked-directory/fixture.json', `/${root}`]) {
+    const result = await new Promise((resolve, reject) => {
+      const request = http.get({ host: '127.0.0.1', port: server.address().port, path: url }, (response) => {
+        let body = '';
+        response.setEncoding('utf8');
+        response.on('data', (chunk) => { body += chunk; });
+        response.on('end', () => resolve({ status: response.statusCode, body }));
+      });
+      request.on('error', reject);
+    });
+    assert.equal(result.status, 403, url);
+    assert.equal(result.body, 'Forbidden');
   }
 });
 

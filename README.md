@@ -9,7 +9,9 @@ for browser development and the mock lifecycle.
 **Real delivery is deliberately disabled until bootstrap.** A mock PASS is
 not a physical-TV PASS. No physical TV, camera, signing certificate, Copilot
 inference entitlement or live model availability was available during
-scaffolding. This PR must be reviewed and merged by the owner, not this factory.
+scaffolding. Production telemetry parsing and the private device-workflow
+bridge still require implementation, not just configuration. This scaffold
+must be reviewed and merged by the owner, not this factory.
 The actual default branch was inspected: `master`. The closed, empty earlier
 scaffold PR #1 is not reused.
 
@@ -28,6 +30,11 @@ private. No mandatory bundler or application runtime dependency is involved.
 Use arrows, Enter, and Escape/Backspace as the TV remote. The sign-in screen is
 intentionally a placeholder; all folders and pictures are bundled synthetic
 fixtures. Diagnostics show the build, actual user agent, viewport and last key.
+Every screen retains the full commit and a `FRAME` marker. Number keys replace
+its rolling six-digit challenge without moving focus or restarting playback,
+so the camera harness can require a newly observed frame rather than a stale
+picture. The physical remote bridge and camera decoder must support this
+contract; browser key tests do not verify the real bridge.
 
 ```sh
 npm test
@@ -76,6 +83,46 @@ Transient failures back off; expiration, exhausted attempts and no progress
 block work instead of looping forever. Acceptance FAIL is a repair/blocked
 outcome; INCONCLUSIVE is never delivery success.
 
+### Local operation, stopping and recovery
+
+Use a separate state directory for each synthetic experiment:
+
+```sh
+npm run factory:mock -- --state-dir .factory-local/pass
+npm run factory:mock -- --state-dir .factory-local/transient --scenario transient
+npm run factory:mock -- --state-dir .factory-local/missing-camera --scenario missing-camera
+```
+
+The JSON summary reports the actual task outcome; process completion alone is
+not a delivery verdict. Inspect `state.json` and `mock-effects.json` in the
+selected directory for persisted intents, receipts, attempts and simulation
+labels. Rerun the same command to resume; a delivered run performs no new work.
+The `crash` scenario deliberately fails once after a simulated side effect:
+rerunning with the same state directory recovers the original intent.
+
+Set `FACTORY_STOP=true` or create `STOP` in that state directory to stop before
+the next dispatch. Remove the stop condition and rerun to resume an unexpired,
+nonterminal run. Do not delete live locks, reset attempt counters or rewrite
+receipts. Unknown lock ownership requires operator investigation. Expired or
+blocked runs retain their evidence and require a separately approved new run,
+not an automatic retry with erased history.
+
+The device CLI can also run without hardware:
+
+```sh
+node factory/device.mjs diagnostics --config config/device.example.json
+node factory/device.mjs deploy --config config/device.example.json
+node factory/device.mjs accept --config config/device.example.json
+```
+
+The example configuration is explicitly **mock**. Device exit codes are
+`0` for PASS, `1` for FAIL and `2` for INCONCLUSIVE; mock reports always have
+`gateEligible: false`. A deploy PASS only means install/launch steps completed,
+not that camera acceptance passed. Optional `--report` paths must be new files
+in a local project subdirectory; reports are not overwritten. Keep real
+configuration outside version control and pass its absolute path. Never
+publish real CLI output, camera frames or local reports without privacy review.
+
 Application task output may change only the allowed application files. It may
 not edit tests, acceptance criteria, signing configuration, workflows, model
 policy or the controller. **Factory maintenance is a separate owner-reviewed
@@ -116,6 +163,15 @@ does not produce valid review or acceptance evidence.
 catalog evidence, selected ID/effort and any exposed response telemetry
 separately. Do not label a configured model as an observed backend model.
 No real inference was performed during scaffolding.
+
+The response-telemetry parser is also an explicit implementation gate:
+`verifyTelemetry()` currently rejects every inference result with
+`TELEMETRY_SCHEMA_UNVERIFIED`. Populating a catalog or enabling a repository
+variable does not remove that gate. A separate owner-reviewed change must
+implement and regression-test the actual supported exporter schema using
+validated, sanitized evidence before real results can be accepted. Never
+replace this with an assumption that the requested model was the responding
+model.
 
 ### Refresh and controlled upgrades
 
@@ -171,6 +227,47 @@ quotas or usage limits; bounded backoff and experiment deadlines still apply.
   on an isolated network. Never register it for general public-PR workloads.
   Repository runner labels by themselves are **not** access controls.
 
+### Actions and bootstrap configuration
+
+| Workflow | Behavior |
+| --- | --- |
+| `ci.yml` | Secretless unit, syntax, build, required Chromium and mock lifecycle checks on pushes/PRs; ledger pushes are excluded |
+| `factory-mock.yml` | Owner/default-branch manual dispatch of a bounded synthetic scenario |
+| `factory-controller.yml` | Opt-in owner dispatch or separately enabled schedule; resumes the durable `factory-ledger` branch using a repository-scoped App token |
+| `factory-worker.yml` | App-authorized, intent-correlated planning/implementation/repair; independent browser and review jobs combine matching same-run receipts |
+| `factory-device.yml` | App-authorized **INCONCLUSIVE bootstrap stub**; no LAN runner, signing, installation, camera or inference is invoked |
+
+The device workflow is intentionally not a production deployment path. Before
+replacing its stub, implement independently enforced private runner admission,
+per-device serialization, private evidence retention, and the receipt bridge
+binding tested source, merged source, unsigned manifest hash, signed widget
+hash and camera acceptance. These hashes are different identities and must
+not be substituted for each other. No repository variable bypasses this work.
+
+Configure credentials only after reviewing the default-branch harness:
+
+| Setting | Location and boundary |
+| --- | --- |
+| `FACTORY_ENABLED` | Repository variable; must be `true` **and** trusted config must have `enabled: true`, `stop: false` |
+| `FACTORY_STOP` | Repository variable; `true` prevents new production work; trusted config `stop: true` independently stops it |
+| `FACTORY_SCHEDULE_ENABLED` | Repository variable; separate opt-in for the five-minute controller schedule |
+| `FACTORY_APP_ID` | Repository variable matching the dedicated App ID in trusted config; configure its exact `appBotLogin` too |
+| `FACTORY_APP_PRIVATE_KEY` | Secret in the default-branch-restricted `factory-control` environment only; token requests are limited to this repository and Actions, Contents and Pull requests write permissions |
+| `COPILOT_GITHUB_TOKEN` | Secret in the default-branch-restricted `factory-inference` environment only; dedicated scope-reviewed inference credential, never repository-write authentication |
+
+Workers use only read-only `GITHUB_TOKEN` access to verify repository state.
+Checkout credentials are not persisted; controller jobs do not run app code,
+package scripts or inference. Only bounded structured receipts are uploaded,
+with short retention; raw camera and inference logs are not public artifacts.
+Keep goals and fixtures synthetic while those receipts are public.
+
+Leave production activation off until the telemetry parser, private device
+bridge and all physical/model bootstrap gates are complete. A dispatched
+workflow finishing is not proof of delivery; inspect the correlated receipt
+and durable controller status. Stop scheduled intake, set `FACTORY_STOP=true`
+and cancel in-flight runs for an emergency stop; already-dispatched jobs are
+not revoked merely by changing a variable.
+
 The repo API available during this task confirmed the default branch but did
 not expose auto-merge/protection settings. A further authenticated settings
 read was unavailable; the earlier report that auto-merge was disabled is **not
@@ -212,8 +309,10 @@ camera acceptance → deliberately broken build rejected**
    remote APIs work on this model.
 6. **Camera.** Select the Linux camera device, resolution and screen crop.
    Point it only at the TV. Test fresh captures after actions and configure an
-   independent build detector that reads the displayed full build ID.
-   The detector must not echo its expected-build argument.
+   independent build detector that reads the displayed full build ID and
+   six-digit `FRAME` challenge. It receives the captured file, request ID and
+   hash, not the expected build or challenge; it must decode the image rather
+   than echo caller-provided expectations.
 7. **Diagnostic package.** Build an immutable synthetic-only commit, prepare
    and sign the `.wgt`, install and launch it. Independently observe the
    expected build. Record runtime/user-agent, viewport and last remote key.

@@ -1,0 +1,79 @@
+name: Production factory controller (opt-in)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: factory-controller
+  cancel-in-progress: false
+
+jobs:
+  controller:
+    if: >-
+      github.repository == 'VasiliyNovikov/TzOneDrive' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      vars.FACTORY_ENABLED == 'true' && vars.FACTORY_STOP != 'true' &&
+      ((github.event_name == 'workflow_dispatch' && github.actor == github.repository_owner &&
+        github.triggering_actor == github.repository_owner) ||
+       (github.event_name == 'schedule' && vars.FACTORY_SCHEDULE_ENABLED == 'true'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Store the App key only here; restrict this environment to the default branch.
+    environment: factory-control
+    env:
+      FACTORY_ENABLED: ${{ vars.FACTORY_ENABLED }}
+      FACTORY_STOP: ${{ vars.FACTORY_STOP }}
+      FACTORY_SCHEDULE_ENABLED: ${{ vars.FACTORY_SCHEDULE_ENABLED }}
+      FACTORY_APP_ID: ${{ vars.FACTORY_APP_ID }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: factory
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Authorize trusted controller before minting a write token
+        id: gate
+        env:
+          FACTORY_READ_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFile } from 'node:fs/promises';
+          import { GitHubAPI } from './factory/github-api.mjs';
+          import { authorizeController, isEnabled } from './factory/github-adapter.mjs';
+          const { config } = await authorizeController(new GitHubAPI({ token: process.env.FACTORY_READ_TOKEN }));
+          await appendFile(process.env.GITHUB_OUTPUT, `enabled=${isEnabled(config)}\n`);
+          NODE
+      - name: Mint repository-scoped control-plane token
+        if: steps.gate.outputs.enabled == 'true'
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.FACTORY_APP_ID }}
+          private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          owner: VasiliyNovikov
+          repositories: TzOneDrive
+          permission-actions: write
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Resume durable production controller (no app, npm or inference execution)
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          FACTORY_GITHUB_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { runProduction } from './factory/github-adapter.mjs';
+          const state = await runProduction();
+          console.log(JSON.stringify({
+            status: state.status, mode: state.mode,
+            actionCount: state.actionCount, nextWakeAt: state.nextWakeAt
+          }));
+          NODE
