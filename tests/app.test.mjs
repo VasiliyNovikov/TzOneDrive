@@ -267,6 +267,38 @@ test('server path parsing rejects traversal, encoded separators, dotfiles, and m
   }
 });
 
+test('static server supports a Pages project path without exposing unprefixed assets', async (t) => {
+  for (const basePath of ['TzOneDrive/', '/TzOneDrive', '//', '/../', '/.git/', '/a?b/']) {
+    await assert.rejects(createAppServer({ basePath }), /APP_BASE_PATH/);
+  }
+  const server = await createAppServer({ basePath: '/TzOneDrive/' });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const request = url => new Promise((resolve, reject) => {
+    const req = http.get({ host: '127.0.0.1', port: server.address().port, path: url }, response => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', chunk => { body += chunk; });
+      response.on('end', () => resolve({ status: response.statusCode, body }));
+    });
+    req.on('error', reject);
+  });
+  const index = await request('/TzOneDrive/?preview=1');
+  assert.equal(index.status, 200);
+  assert.match(index.body, /data-build-commit="[a-f0-9]{40}"/);
+  for (const asset of ['main.js', 'styles.css', 'build.json', 'assets/photos/coast.svg']) {
+    assert.equal((await request(`/TzOneDrive/${asset}`)).status, 200, asset);
+    assert.equal((await request(`/${asset}`)).status, 404, asset);
+  }
+  for (const url of ['/', '/TzOneDrive-other/', '/TzOneDrive/package.json']) {
+    assert.equal((await request(url)).status, 404, url);
+  }
+  for (const url of ['/TzOneDrive/../package.json', '/TzOneDrive/%2e%2e%2fpackage.json',
+    '/TzOneDrive/.git/config', '/TzOneDrive/%zz', '/TzOneDrive/assets\\..\\package.json']) {
+    assert.equal((await request(url)).status, 403, url);
+  }
+});
+
 test('static server rejects the root itself and symlinks outside its exact asset directory', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'tzonedrive-server-'));
   let server;

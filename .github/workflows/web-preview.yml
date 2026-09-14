@@ -1,0 +1,67 @@
+name: Web preview (GitHub Pages)
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: >-
+      github.repository == 'VasiliyNovikov/TzOneDrive' &&
+      github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CI: 'true'
+      BUILD_ID: ${{ github.sha }}
+      APP_ROOT: dist/app
+      APP_BASE_PATH: /TzOneDrive/
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: npm run check
+      - run: npm run build
+      - run: npx --no-install playwright install --with-deps chromium
+      - name: Test the built preview at the Pages project path
+        run: npm run test:browser
+      - name: Exercise the bounded factory mock (not real delivery)
+        run: npm run factory:mock -- --max-actions 50 --experiment-ms 60000
+      - name: Upload only the tested static app
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: dist/app
+          retention-days: 1
+
+  deploy:
+    needs: build
+    if: >-
+      github.repository == 'VasiliyNovikov/TzOneDrive' &&
+      github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publish the tested browser preview
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

@@ -1,13 +1,37 @@
 import { test, expect } from '@playwright/test';
 
 async function openCollection(page) {
-  await page.goto('/');
+  await page.goto('./');
   await expect(page.getByRole('button', { name: 'Explore collections' })).toBeFocused();
   await page.keyboard.press('Enter');
   await expect(page.locator('[data-focus-id="folder-coastal-quiet"]')).toBeFocused();
   await page.keyboard.press('Enter');
   await expect(page.locator('[data-focus-id="photo-coast"]')).toBeFocused();
 }
+
+test('static preview loads scripts, styles, photos and matching metadata beneath its base URL', async ({ page, baseURL }) => {
+  const requests = [];
+  const failures = [];
+  page.on('request', request => requests.push(request.url()));
+  page.on('requestfailed', request => failures.push(request.url()));
+  page.on('response', response => {
+    if (response.status() >= 400) failures.push(response.url());
+  });
+  await openCollection(page);
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.full-photo')).toHaveClass(/loaded/);
+  await expect(page.locator('#build-mark')).toBeInViewport();
+  for (const asset of ['main.js', 'styles.css', 'assets/photos/coast.svg']) {
+    expect(requests).toContain(new URL(asset, baseURL).href);
+  }
+  expect(requests.every(url => url.startsWith(baseURL))).toBe(true);
+  expect(failures).toEqual([]);
+  const response = await page.request.get(new URL('build.json', baseURL).href);
+  expect(response.ok()).toBe(true);
+  const identity = await response.json();
+  expect(identity.commit).toMatch(/^[a-f0-9]{40}$/);
+  await expect(page.locator('#build-mark')).toHaveAttribute('data-build-commit', identity.commit);
+});
 
 test('startup shows complete build/device identity and records keyboard and Tizen Back input', async ({ page, baseURL }) => {
   const errors = [];
@@ -17,7 +41,7 @@ test('startup shows complete build/device identity and records keyboard and Tize
   page.on('request', (request) => {
     if (new URL(request.url()).origin !== appOrigin) remoteRequests.push(request.url());
   });
-  await page.goto('/');
+  await page.goto('./');
   await expect(page.getByRole('heading', { name: 'Device diagnostics' })).toBeVisible();
   await expect(page.locator('#diagnostic-commit')).toHaveText(/^[a-f0-9]{40}$/);
   await expect(page.locator('#diagnostic-viewport')).toContainText(String(page.viewportSize().width));
@@ -41,7 +65,7 @@ test('startup shows complete build/device identity and records keyboard and Tize
 
 test('fresh camera challenges stay visible without moving focus or restarting the slideshow', async ({ page }) => {
   await page.clock.install();
-  await page.goto('/');
+  await page.goto('./');
   const commit = await page.locator('#diagnostic-commit').innerText();
   await page.keyboard.type('000123');
   await expect(page.locator('#camera-challenge')).toHaveText('000123');
@@ -70,7 +94,7 @@ test('fresh camera challenges stay visible without moving focus or restarting th
 });
 
 test('arrows, Enter and Back navigate grids with exact folder and photo focus restoration', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('./');
   await page.keyboard.press('Enter');
   await page.keyboard.press('ArrowRight');
   await expect(page.locator('[data-focus-id="folder-alpine-light"]')).toBeFocused();

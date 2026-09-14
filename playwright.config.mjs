@@ -1,6 +1,8 @@
 import { defineConfig } from '@playwright/test';
 
 const port = Number(process.env.PORT || 4173);
+const basePath = process.env.APP_BASE_PATH || '/';
+const baseURL = `http://127.0.0.1:${port}${basePath}`;
 
 export default defineConfig({
   testDir: './tests/browser',
@@ -11,7 +13,7 @@ export default defineConfig({
   reporter: 'list',
   outputDir: 'test-results',
   use: {
-    baseURL: `http://127.0.0.1:${port}`,
+    baseURL,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     headless: true,
@@ -22,8 +24,8 @@ export default defineConfig({
   ],
   webServer: {
     command: 'node scripts/serve.mjs',
-    url: `http://127.0.0.1:${port}`,
+    url: baseURL,
     reuseExistingServer: false,
-    env: { HOST: '127.0.0.1', PORT: String(port), APP_ROOT: process.env.APP_ROOT || 'app' },
+    env: { HOST: '127.0.0.1', PORT: String(port), APP_ROOT: process.env.APP_ROOT || 'app', APP_BASE_PATH: basePath },
   },
 });
