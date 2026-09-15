@@ -95,11 +95,13 @@ APP_ROOT=dist/app APP_BASE_PATH=/TzOneDrive/ npm start
 ```
 
 **Factory status:** the browser checks and bounded synthetic factory lifecycle
-can run now, but this does **not** enable autonomous model-driven development or
-physical delivery. The real controller still requires App/inference bootstrap,
-verified model telemetry and a physical acceptance path. Do not flip its enable
-or stop flags to bypass those gates. Owner input and the separate browser-only
-completion target are tracked in
+can run now, and the disabled trusted config now names a separate
+`browser-preview` completion target. This does **not** enable autonomous
+model-driven development or physical delivery. The real controller still requires
+App/inference bootstrap, verified model telemetry and a trustworthy pre-call cost
+source before it can create or review app changes. Do not flip its enable or stop
+flags to bypass those gates. Owner input and browser-only completion readiness are
+tracked in
 [issue #5](https://github.com/VasiliyNovikov/TzOneDrive/issues/5).
 Deferred TV, signing, remote, camera and private-host setup is tracked in
 [issue #4](https://github.com/VasiliyNovikov/TzOneDrive/issues/4); it does not block
@@ -131,6 +133,23 @@ trusted goal → backlog → plan → implement → PR → independent validatio
               ↑                              ↓ bounded repair
 next task ← physical acceptance ← deploy ← exact-tested-commit merge
 ```
+
+The owner-controlled `factory/trusted-config.json` field `completionTarget`
+selects the terminal target for a new durable run:
+
+* `physical-tv` (legacy default for older ledgers) keeps the full deployment and
+  camera acceptance path. Only authenticated private device receipts can produce
+  a `PHYSICAL` delivery.
+* `browser-preview` completes at `browser-preview-complete` after the exact
+  independently reviewed candidate has been merged and the corresponding
+  GitHub Pages preview publication is verified. It never dispatches
+  `factory-device.yml`, installs/signs a package, requests TV credentials,
+  invokes the camera harness or labels the result as physical acceptance.
+
+The target is persisted in the state and every task. Resumes fail closed if the
+trusted config tries to relabel an existing run, so a legacy physical task cannot
+silently become browser-complete. Mock browser receipts are explicitly synthetic
+and prove only controller behavior.
 
 Tasks have stable IDs, dependencies, attempts, states and correlated evidence.
 Only one implementation is active initially. Persisted intents precede side
@@ -386,6 +405,26 @@ quotas or usage limits; bounded backoff and experiment deadlines still apply.
 | `factory-worker.yml` | App-authorized, intent-correlated planning/implementation/repair; independent browser and review jobs combine matching same-run receipts |
 | `factory-device.yml` | App-authorized **INCONCLUSIVE bootstrap stub**; no LAN runner, signing, installation, camera or inference is invoked |
 
+For `completionTarget: "browser-preview"`, the post-merge deploy stage is an
+observer of the existing Pages workflow, not a workflow dispatcher. It requires:
+
+1. the same independent review PASS and browser/CI package evidence used for the
+   merge gate, tied to the exact candidate head;
+2. merged PR provenance proving GitHub merged that candidate and that the merged
+   commit tree equals the tested tree;
+3. a successful `web-preview.yml` push run for the merged commit, with completed
+   `build` and `deploy` jobs and the unexpired Pages artifact from that run;
+4. a `github-pages` deployment and successful status for that same merged SHA;
+5. the public `build.json` at the Pages URL reporting the merged commit as its
+   `buildId`.
+
+Missing, stale, failed, canceled, pending or ambiguous preview evidence blocks or
+waits within the controller's existing retry/poll/timeout limits. A latest
+successful run, HTTP 200, public artifact `result.json`, bare URL or model claim
+is not completion evidence. The observer fetches the public Pages URL without
+repository credentials; authenticated GitHub requests remain confined to the
+repository API.
+
 The device workflow is intentionally not a production deployment path. Before
 replacing its stub, implement independently enforced private runner admission,
 and authenticated private receipt transport. The local bridge implements
@@ -460,6 +499,27 @@ Configure credentials only after reviewing the default-branch harness:
 | `FACTORY_APP_PRIVATE_KEY` | Secret in the default-branch-restricted `factory-control` environment only; token requests are limited to this repository and Actions, Contents and Pull requests write permissions |
 | `FACTORY_BUDGET_USD_CENTS` | Secret in the default-branch-restricted `factory-control` environment only; integer USD cents for the cumulative inference cap |
 | `COPILOT_GITHUB_TOKEN` | Secret in the default-branch-restricted `factory-inference` environment only; dedicated scope-reviewed inference credential, never repository-write authentication |
+
+Current trusted target settings remain disabled/stopped:
+
+```json
+{
+  "enabled": false,
+  "stop": true,
+  "completionTarget": "browser-preview",
+  "workflows": {
+    "browserPreview": "web-preview.yml"
+  },
+  "browserPreview": {
+    "environment": "github-pages",
+    "url": "https://vasiliynovikov.github.io/TzOneDrive/"
+  }
+}
+```
+
+These settings document owner intent for issue #5 only. They are not activation
+approval, do not satisfy model telemetry or live cost-source blockers, and do not
+resolve the physical TV work tracked in issue #4.
 
 The trusted configuration includes one documented fallback cumulative inference cap:
 `factory/trusted-config.json` → `inferenceBudget.cumulativeCapUsdCents`.
@@ -611,7 +671,7 @@ labels.
 | Capability | Implemented here | Mock coverage | Still unverified / prerequisite |
 | --- | --- | --- | --- |
 | Fixture folders, grid, photo, slideshow, focus | Browser application | Synthetic browser/unit scenarios | Physical remote and installed TV runtime |
-| Hosted web preview | Master-only, test-gated GitHub Pages workflow | Built project-path browser checks and bounded factory mock | Owner Pages/environment setup and first successful deployment; not real factory activation |
+| Hosted web preview | Master-only, test-gated GitHub Pages workflow and separate browser-preview completion target | Built project-path browser checks, bounded factory mock and synthetic preview completion receipts | Owner Pages/environment setup and first successful deployment; model/cost blockers still prevent autonomous factory activation |
 | Build/runtime diagnostics | Bundled diagnostic UI | Build/keyboard checks | Read actual GQ32LS03CBUXZG display |
 | Task lifecycle and recovery | Deterministic controller and durable state | Full lifecycle and failure injection | Live App permissions and Actions handoffs |
 | Copilot execution | Pinned CLI wrapper, explicit role policy | Model/fallback/override failure cases | Authenticated flagship availability, effort, telemetry and visual approval |
