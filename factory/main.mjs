@@ -68,15 +68,39 @@ export async function createMockAdapter({ stateDir, scenario = 'pass' } = {}) {
           result.mergeSha = hash(`SIMULATED-merge-${result.headSha}`).slice(0, 40);
           break;
         case 'deploy':
-          Object.assign(result, {
-            headSha: evidence.validate.testedSha,
-            buildId: evidence.validate.package.buildId,
-            packageSha256: evidence.validate.package.sha256,
-            deviceMode: scenario === 'fallback' ? 'emulator' : 'mock',
-            deviceId: 'SIMULATED-TV',
-            installed: true,
-            launched: true,
-          });
+          if (context.completionTarget === 'browser-preview') {
+            Object.assign(result, {
+              target: 'browser-preview',
+              result: 'browser-preview-complete',
+              headSha: evidence.validate.testedSha,
+              candidateHeadSha: evidence.validate.testedSha,
+              mergeSha: evidence.merge.mergeSha,
+              buildId: evidence.merge.mergeSha,
+              publishedBuildId: evidence.merge.mergeSha,
+              artifactBuildId: evidence.merge.mergeSha,
+              packageSha256: evidence.validate.package.sha256,
+              testedPackageSha256: evidence.validate.package.sha256,
+              workflow: 'web-preview.yml',
+              workflowRunId: 101,
+              artifactId: 202,
+              deploymentId: 303,
+              environment: 'github-pages',
+              url: 'https://vasiliynovikov.github.io/TzOneDrive/',
+              testedTree: hash(`SIMULATED-tree-${evidence.validate.testedSha}`).slice(0, 40),
+              mergedTree: hash(`SIMULATED-tree-${evidence.validate.testedSha}`).slice(0, 40),
+              label: 'SIMULATED browser preview — NOT PHYSICAL ACCEPTANCE',
+            });
+          } else {
+            Object.assign(result, {
+              headSha: evidence.validate.testedSha,
+              buildId: evidence.validate.package.buildId,
+              packageSha256: evidence.validate.package.sha256,
+              deviceMode: scenario === 'fallback' ? 'emulator' : 'mock',
+              deviceId: 'SIMULATED-TV',
+              installed: true,
+              launched: true,
+            });
+          }
           break;
         case 'accept':
           for (const field of ['headSha', 'buildId', 'packageSha256', 'deviceMode', 'deviceId']) result[field] = evidence.deploy[field];
@@ -106,11 +130,12 @@ export async function createMockAdapter({ stateDir, scenario = 'pass' } = {}) {
 
 function parseArgs(argv) {
   const [command = 'mock', ...rest] = argv;
-  if (!['mock', 'real'].includes(command)) throw new Error('Usage: node factory/main.mjs mock|real [--state-dir PATH] [--goal TEXT] [--tasks FILE]');
-  const options = { command, stateDir: resolve('.factory-local') };
+  if (!['mock', 'real'].includes(command)) throw new Error('Usage: node factory/main.mjs mock|real [--state-dir PATH] [--goal TEXT] [--tasks FILE] [--completion-target physical-tv|browser-preview]');
+  const options = { command, stateDir: resolve('.factory-local'), completionTarget: 'physical-tv' };
   const names = {
     '--state-dir': 'stateDir', '--scenario': 'scenario', '--goal': 'goal',
     '--tasks': 'tasksFile', '--max-actions': 'maxActions', '--experiment-ms': 'experimentMs',
+    '--completion-target': 'completionTarget',
   };
   for (let i = 0; i < rest.length; i += 2) {
     const name = names[rest[i]];
@@ -119,6 +144,7 @@ function parseArgs(argv) {
   }
   if (options.goal && options.tasksFile) throw new Error('Use either --goal or --tasks, not both');
   if (options.scenario && command !== 'mock') throw new Error('--scenario is only valid for mock runs');
+  if (!['physical-tv', 'browser-preview'].includes(options.completionTarget)) throw new Error('Invalid completion target');
   options.stateDir = resolve(options.stateDir);
   return options;
 }
@@ -130,11 +156,15 @@ export async function main(argv = process.argv.slice(2)) {
     if (state) {
       assertState(state);
       if (state.mode !== options.command) throw new Error('Cannot reuse mock state for real execution, or vice versa');
+      if ((state.completionTarget ?? 'physical-tv') !== options.completionTarget) throw new Error('Existing completion target is immutable');
       if (options.goal || options.tasksFile) {
         const proposed = options.tasksFile ? JSON.parse(await readFile(resolve(options.tasksFile), 'utf8')) :
           [{ id: 'goal', goal: options.goal }];
         const identity = ({ id, goal, dependsOn }) => ({ id, goal, dependsOn });
-        const normalized = createState(proposed, { now: state.createdAt, mode: state.mode, limits: state.limits });
+        const normalized = createState(proposed, {
+          now: state.createdAt, mode: state.mode, limits: state.limits,
+          completionTarget: state.completionTarget ?? 'physical-tv',
+        });
         if (JSON.stringify(normalized.tasks.map(identity)) !==
             JSON.stringify(state.tasks.filter((task) => !task.sourceTaskId).map(identity))) {
           throw new Error('Existing trusted backlog is immutable');
@@ -157,7 +187,7 @@ export async function main(argv = process.argv.slice(2)) {
       const limits = {};
       if (options.maxActions !== undefined) limits.maxActions = Number(options.maxActions);
       if (options.experimentMs !== undefined) limits.experimentMs = Number(options.experimentMs);
-      state = createState(tasks, { mode: options.command, limits });
+      state = createState(tasks, { mode: options.command, limits, completionTarget: options.completionTarget });
       if (options.command === 'mock') state.mockScenario = options.scenario ?? 'pass';
       await store.save(state);
     }
@@ -181,12 +211,14 @@ export async function main(argv = process.argv.slice(2)) {
     console.log(JSON.stringify({
       status: state.status,
       mode: state.mode,
+      completionTarget: state.completionTarget ?? 'physical-tv',
       simulated: state.simulated,
-      notice: state.simulated ? 'SIMULATED ONLY: does not prove real-device acceptance' : 'Physical evidence required',
+      notice: state.simulated ? 'SIMULATED ONLY: does not prove real-device or live browser publication' :
+        (state.completionTarget === 'browser-preview' ? 'Browser preview publication evidence required' : 'Physical evidence required'),
       stateDir: store.directory,
       actionCount: state.actionCount,
       nextWakeAt: state.nextWakeAt,
-      tasks: state.tasks.map(({ id, status, stage, blockedReason, delivery }) => ({ id, status, stage, blockedReason, delivery })),
+      tasks: state.tasks.map(({ id, status, stage, blockedReason, delivery, result }) => ({ id, status, stage, blockedReason, delivery, result })),
     }, null, 2));
     return state;
   });

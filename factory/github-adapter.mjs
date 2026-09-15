@@ -8,7 +8,12 @@ import { preCallCostBound } from './inference-cost.mjs';
 import { resolvePolicy } from './model-policy.mjs';
 
 const SHA = /^[a-f0-9]{40}$/;
+const HASH = /^[a-f0-9]{64}$/;
 const IDENTIFIER = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/;
+const COMPLETION_TARGETS = ['physical-tv', 'browser-preview'];
+const BROWSER_PREVIEW_WORKFLOW = 'web-preview.yml';
+const BROWSER_PREVIEW_ENVIRONMENT = 'github-pages';
+const BROWSER_PREVIEW_URL = 'https://vasiliynovikov.github.io/TzOneDrive/';
 export const assertSha = value => {
   if (!SHA.test(value || '')) throw new Error('Expected an immutable commit SHA');
   return value;
@@ -25,7 +30,18 @@ function assertAppIdentity(config) {
     throw new Error('Trusted repository/App identity has not been configured');
   }
   validateTrustedBudget(config);
+  const target = config.completionTarget ?? 'physical-tv';
+  if (!COMPLETION_TARGETS.includes(target)) throw new Error('Invalid trusted completion target');
+  if (target === 'browser-preview') {
+    if (config.workflows?.browserPreview !== BROWSER_PREVIEW_WORKFLOW ||
+        config.browserPreview?.environment !== BROWSER_PREVIEW_ENVIRONMENT ||
+        config.browserPreview?.url !== BROWSER_PREVIEW_URL) {
+      throw new Error('Browser preview completion target requires trusted workflow, environment and URL');
+    }
+  }
 }
+
+const trustedCompletionTarget = config => config.completionTarget ?? 'physical-tv';
 
 export function validateEdits(output, limits = {}) {
   const bounds = {
@@ -291,6 +307,98 @@ export class GitHubAdapter {
     if (merged.tree.sha !== commit.tree.sha) throw new Error('Merged tree differs from the tested tree; deployment forbidden');
     return { merged: true, sha: mergeSha };
   }
+
+  async fetchPublishedBuild(url) {
+    if (typeof url !== 'string' || !url.startsWith(BROWSER_PREVIEW_URL) ||
+        /[\\#\r\n]/.test(url) || new URL(url).origin !== new URL(BROWSER_PREVIEW_URL).origin) {
+      throw new Error('Untrusted browser preview URL');
+    }
+    const response = await this.api.fetch(url, { redirect: 'error' });
+    if (!response.ok) throw new Error('Browser preview build identity is unavailable');
+    if (Number(response.headers.get('content-length')) > 64 * 1024) throw new Error('Browser preview build identity is too large');
+    const text = await response.text();
+    if (Buffer.byteLength(text) > 64 * 1024) throw new Error('Browser preview build identity is too large');
+    return JSON.parse(text);
+  }
+
+  async observeBrowserPreview({ taskId, key, number, candidateHead, mergeSha, packageSha256 }) {
+    if (!Number.isSafeInteger(number) || number <= 1) throw new Error('Forbidden pull request');
+    assertSha(candidateHead);
+    assertSha(mergeSha);
+    if (!HASH.test(packageSha256 ?? '')) throw new Error('Expected tested package hash');
+    const current = await this.trustedContext();
+    if (trustedCompletionTarget(current.config) !== 'browser-preview') throw new Error('Browser preview completion is not trusted');
+    if (current.sha !== mergeSha) {
+      return { status: 'failed', reason: 'Default branch no longer matches the browser preview candidate' };
+    }
+    const pr = await this.api.request('GET', `/pulls/${number}`);
+    if (pr.number !== number || pr.number <= 1 || pr.merged !== true || pr.merge_commit_sha !== mergeSha ||
+        pr.head.sha !== candidateHead || pr.user?.login !== current.config.appBotLogin ||
+        pr.head.repo?.full_name !== REPOSITORY || pr.base?.ref !== current.branch ||
+        !pr.body?.includes(marker(taskId, key))) {
+      throw new Error('Merged PR provenance mismatch');
+    }
+    const [candidateCommit, mergedCommit] = await Promise.all([candidateHead, mergeSha]
+      .map(sha => this.api.request('GET', `/git/commits/${sha}`)));
+    const testedTree = assertSha(candidateCommit.tree?.sha);
+    const mergedTree = assertSha(mergedCommit.tree?.sha);
+    if (testedTree !== mergedTree) throw new Error('Tested and merged source trees differ');
+
+    const workflow = current.config.workflows.browserPreview;
+    const runs = await this.api.list(`/actions/workflows/${workflow}/runs?event=push&head_sha=${mergeSha}`);
+    const matches = runs.filter(run => run.head_sha === mergeSha && run.event === 'push' &&
+      run.path?.split('@')[0] === `.github/workflows/${workflow}`);
+    if (matches.length > 1) throw new Error('Ambiguous browser preview workflow run');
+    if (!matches.length || matches[0].status !== 'completed') return { status: 'pending' };
+    const run = matches[0];
+    if (run.conclusion !== 'success') return { status: 'failed', reason: `Browser preview workflow ${run.id}: ${run.conclusion}` };
+    const jobs = await this.api.list(`/actions/runs/${run.id}/jobs`);
+    for (const name of ['build', 'deploy']) {
+      const job = jobs.find(item => item.name === name);
+      if (!job || job.status !== 'completed' || job.conclusion !== 'success') {
+        return { status: 'failed', reason: `Browser preview ${name} job did not pass` };
+      }
+    }
+    const artifacts = await this.api.list(`/actions/runs/${run.id}/artifacts`);
+    const pagesArtifacts = artifacts.filter(artifact => artifact.name === 'github-pages' &&
+      !artifact.expired && artifact.workflow_run?.id === run.id);
+    if (pagesArtifacts.length !== 1) return { status: 'failed', reason: 'Missing or ambiguous GitHub Pages artifact' };
+    const deployments = await this.api.list(`/deployments?environment=${encodeURIComponent(current.config.browserPreview.environment)}&sha=${mergeSha}`);
+    const matchingDeployments = deployments.filter(deployment => deployment.sha === mergeSha &&
+      deployment.environment === current.config.browserPreview.environment);
+    if (matchingDeployments.length !== 1) throw new Error('Missing or ambiguous browser preview deployment');
+    const statuses = await this.api.list(`/deployments/${matchingDeployments[0].id}/statuses`);
+    const success = statuses.find(status => status.state === 'success' &&
+      typeof status.environment_url === 'string' && status.environment_url.startsWith(current.config.browserPreview.url));
+    if (!success) return { status: 'failed', reason: 'Browser preview deployment did not publish the trusted environment' };
+    const published = await this.fetchPublishedBuild(`${current.config.browserPreview.url}build.json?factory-build=${mergeSha}`);
+    if (published.schemaVersion !== 1 || published.commit !== mergeSha || published.buildId !== mergeSha) {
+      return { status: 'failed', reason: 'Published browser preview build identity does not match the merged commit' };
+    }
+    return {
+      status: 'completed',
+      result: {
+        target: 'browser-preview',
+        result: 'browser-preview-complete',
+        headSha: candidateHead,
+        candidateHeadSha: candidateHead,
+        mergeSha,
+        buildId: mergeSha,
+        publishedBuildId: published.buildId,
+        artifactBuildId: mergeSha,
+        packageSha256,
+        testedPackageSha256: packageSha256,
+        workflow,
+        workflowRunId: run.id,
+        artifactId: pagesArtifacts[0].id,
+        deploymentId: matchingDeployments[0].id,
+        environment: current.config.browserPreview.environment,
+        url: success.environment_url,
+        testedTree,
+        mergedTree,
+      }
+    };
+  }
 }
 
 export const contentHash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -373,6 +481,9 @@ export async function authorizeDispatch(api, inputs, env = process.env) {
     throw new Error('Dispatch is not for the tracked candidate');
   }
   if (inputs.stage === 'deploy') {
+    if ((state.completionTarget ?? 'physical-tv') !== 'physical-tv') {
+      throw new Error('Browser preview completion cannot dispatch the TV workflow');
+    }
     if (task.evidence.merge?.merged !== true || inputs.head !== task.evidence.merge.mergeSha ||
         inputs.base !== inputs.head || current.sha !== inputs.head ||
         validationGate(task, 'real') || task.evidence.merge.headSha !== task.evidence.validate.testedSha) {
@@ -416,6 +527,33 @@ export async function createAdapter(options = {}) {
       });
       if (!result.merged) return { verdict: 'FAIL', simulated: false, stale: true, reason: 'Default branch advanced; candidate must be rebuilt and reviewed' };
       return pass({ merged: true, headSha: context.evidence.validate.testedSha, mergeSha: result.sha });
+    }
+    if (action === 'deploy' && context.completionTarget === 'browser-preview') {
+      const trusted = await adapter.trustedContext();
+      if (!isEnabled(trusted.config, adapter.env)) throw new Error('Factory stopped');
+      const ticket = context.previousReceipt?.ticket ?? {
+        taskId: task.id, stage: action, key, head: context.evidence.merge.mergeSha,
+        base: context.evidence.merge.mergeSha, harness: trusted.sha, workflow: trusted.config.workflows.browserPreview,
+      };
+      if (ticket.taskId !== task.id || ticket.stage !== action || ticket.key !== key ||
+          ticket.head !== context.evidence.merge.mergeSha || ticket.base !== ticket.head ||
+          ticket.harness !== trusted.sha || ticket.workflow !== trusted.config.workflows.browserPreview) {
+        throw new Error('Persisted browser preview ticket mismatch');
+      }
+      if (!context.previousReceipt?.ticket) {
+        await context.checkpointPending({ pending: true, simulated: false, nextPollAt: context.now + 60000, ticket });
+      }
+      const observed = await adapter.observeBrowserPreview({
+        taskId: task.id,
+        key: context.evidence.pr.publishKey,
+        number: context.evidence.pr.prNumber,
+        candidateHead: context.evidence.validate.testedSha,
+        mergeSha: context.evidence.merge.mergeSha,
+        packageSha256: context.evidence.validate.package.sha256,
+      });
+      if (observed.status === 'pending') return { pending: true, simulated: false, nextPollAt: context.now + 60000, ticket };
+      if (observed.status === 'failed') return { verdict: 'FAIL', simulated: false, reason: observed.reason };
+      return pass(observed.result);
     }
     if (action === 'accept') {
       return { verdict: 'INCONCLUSIVE', simulated: false, reasonCode: 'PRIVATE_DEVICE_TRANSPORT_REQUIRED' };
@@ -474,10 +612,20 @@ export async function runProduction({ env = process.env, api } = {}) {
     if (!next) throw new Error('Concurrent ledger modification; no side effect may continue');
     version = next;
   };
-  if (!state) state = createState(config.backlog, { mode: 'real' });
+  if (!state) state = createState(config.backlog, { mode: 'real', completionTarget: trustedCompletionTarget(config) });
   else if (quarantineMissingBudgetLedger(state, config, Date.now())) await persist(state);
   assertState(state);
   if (state.mode !== 'real') throw new Error('Production ledger cannot contain simulated state');
+  if ((state.completionTarget ?? 'physical-tv') !== trustedCompletionTarget(config)) {
+    state.status = 'blocked';
+    for (const task of state.tasks.filter(item => !['blocked', 'delivered'].includes(item.status))) {
+      task.status = 'blocked';
+      task.blockedReason = 'completion-target-mismatch';
+    }
+    state.activeTaskId = null;
+    await persist(state);
+    return state;
+  }
   if (!isEnabled(config, env)) {
     state.status = 'stopped';
     await persist(state);

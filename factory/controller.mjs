@@ -19,8 +19,10 @@ export const DEFAULT_LIMITS = Object.freeze({
   maxBackoffMs: 60 * 1000,
 });
 
+const TARGETS = ['physical-tv', 'browser-preview'];
 const ACTIONS = ['plan', 'implement', 'pr', 'validate', 'repair', 'merge', 'deploy', 'accept'];
 const TERMINAL = new Set(['delivered', 'blocked']);
+const STATE_TERMINAL = new Set(['delivered', 'browser-preview-complete', 'blocked']);
 const ID = /^[a-z][a-z0-9-]{0,63}$/;
 const SHA = /^[a-f0-9]{40}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -31,6 +33,28 @@ function time(value) {
   const result = typeof value === 'string' ? Date.parse(value) : value;
   if (!Number.isSafeInteger(result) || result < 0) throw new Error('now must be an epoch timestamp or ISO date');
   return result;
+}
+
+function browserPreviewGate(task, receipt) {
+  const validated = task.evidence.validate;
+  const merged = task.evidence.merge;
+  const artifact = validated?.package;
+  if (validationGate(task, 'mock') || !merged?.merged || !SHA.test(merged.mergeSha ?? '')) return 'browser-preview-provenance-missing';
+  if (receipt.target !== 'browser-preview' || receipt.result !== 'browser-preview-complete' ||
+      receipt.headSha !== validated.testedSha || receipt.candidateHeadSha !== validated.testedSha ||
+      receipt.mergeSha !== merged.mergeSha || receipt.workflow !== 'web-preview.yml' ||
+      receipt.environment !== 'github-pages') return 'browser-preview-identity-mismatch';
+  if (receipt.buildId !== merged.mergeSha || receipt.publishedBuildId !== merged.mergeSha ||
+      receipt.packageSha256 !== artifact.sha256 || receipt.testedPackageSha256 !== artifact.sha256 ||
+      receipt.artifactBuildId !== receipt.buildId) return 'browser-preview-build-mismatch';
+  if (!Number.isSafeInteger(receipt.workflowRunId) || receipt.workflowRunId <= 0 ||
+      !Number.isSafeInteger(receipt.artifactId) || receipt.artifactId <= 0 ||
+      !Number.isSafeInteger(receipt.deploymentId) || receipt.deploymentId <= 0 ||
+      typeof receipt.url !== 'string' || !receipt.url.startsWith('https://vasiliynovikov.github.io/TzOneDrive/')) {
+    return 'browser-preview-publication-missing';
+  }
+  if (receipt.testedTree && receipt.mergedTree && receipt.testedTree !== receipt.mergedTree) return 'browser-preview-tree-mismatch';
+  return null;
 }
 
 function validateLimits(limits) {
@@ -51,7 +75,10 @@ function freeze(value) {
   return value;
 }
 
-function taskRecord(input, now) {
+const stateTarget = (state) => state.completionTarget ?? 'physical-tv';
+const taskTarget = (task) => task.completionTarget ?? 'physical-tv';
+
+function taskRecord(input, now, completionTarget) {
   if (!input || !ID.test(input.id)) throw new Error('Task IDs must match [a-z][a-z0-9-]{0,63}');
   if (typeof input.goal !== 'string' || !input.goal.trim() || input.goal.length > 16000) {
     throw new Error('Each task needs a nonempty trusted goal (at most 16000 characters)');
@@ -59,6 +86,7 @@ function taskRecord(input, now) {
   if (input.dependsOn !== undefined && !Array.isArray(input.dependsOn)) throw new Error('dependsOn must be an array');
   return {
     id: input.id,
+    completionTarget,
     goal: input.goal,
     goalHash: digest(input.goal),
     dependsOn: [...new Set(input.dependsOn ?? [])],
@@ -79,9 +107,10 @@ function taskRecord(input, now) {
   };
 }
 
-export function createState(tasks, { mode = 'mock', now = Date.now(), limits = {}, runId } = {}) {
+export function createState(tasks, { mode = 'mock', now = Date.now(), limits = {}, runId, completionTarget = 'physical-tv' } = {}) {
   now = time(now);
   if (!['mock', 'real'].includes(mode)) throw new Error('mode must be mock or real');
+  if (!TARGETS.includes(completionTarget)) throw new Error('completionTarget must be physical-tv or browser-preview');
   if (!Array.isArray(tasks) || !tasks.length) throw new Error('A trusted nonempty backlog is required');
   const resolvedLimits = { ...DEFAULT_LIMITS, ...limits };
   validateLimits(resolvedLimits);
@@ -89,7 +118,8 @@ export function createState(tasks, { mode = 'mock', now = Date.now(), limits = {
     version: 1,
     mode,
     originMode: mode,
-    runId: runId ?? digest(JSON.stringify({ tasks, mode, now })).slice(0, 24),
+    completionTarget,
+    runId: runId ?? digest(JSON.stringify({ tasks, mode, completionTarget, now })).slice(0, 24),
     simulated: mode === 'mock',
     status: 'running',
     createdAt: now,
@@ -100,14 +130,15 @@ export function createState(tasks, { mode = 'mock', now = Date.now(), limits = {
     budget: createBudgetLedger(),
     activeTaskId: null,
     nextWakeAt: null,
-    tasks: tasks.map((input) => taskRecord(input, now)),
+    tasks: tasks.map((input) => taskRecord(input, now, completionTarget)),
   };
   assertState(state);
   return state;
 }
 
 export function assertState(state) {
-  if (state?.version !== 1 || !['mock', 'real'].includes(state.mode) ||
+  const completionTarget = stateTarget(state);
+  if (state?.version !== 1 || !['mock', 'real'].includes(state.mode) || !TARGETS.includes(completionTarget) ||
       state.mode !== state.originMode || state.simulated !== (state.mode === 'mock')) {
     throw new Error('Invalid state version or immutable execution mode');
   }
@@ -117,14 +148,15 @@ export function assertState(state) {
       !Number.isSafeInteger(state.createdAt) || !Number.isSafeInteger(state.updatedAt) ||
       !Number.isSafeInteger(state.expiresAt) || state.expiresAt !== state.createdAt + state.limits.experimentMs ||
       state.updatedAt < state.createdAt ||
-      !['running', 'waiting', 'stopped', 'delivered', 'blocked'].includes(state.status)) {
+      !['running', 'waiting', 'stopped', 'delivered', 'browser-preview-complete', 'blocked'].includes(state.status)) {
     throw new Error('Invalid durable counters, deadline, or state status');
   }
   if (!Array.isArray(state.tasks) || !state.tasks.length) throw new Error('Invalid backlog');
   assertBudgetLedger(state.budget);
   const byId = new Map();
   for (const task of state.tasks) {
-    if (!ID.test(task.id) || byId.has(task.id) || typeof task.goal !== 'string' || digest(task.goal) !== task.goalHash ||
+    if (!ID.test(task.id) || byId.has(task.id) || taskTarget(task) !== completionTarget ||
+        typeof task.goal !== 'string' || digest(task.goal) !== task.goalHash ||
         !Array.isArray(task.dependsOn) || !ACTIONS.includes(task.stage) ||
         !['queued', 'running', 'waiting', 'repair', 'delivered', 'blocked'].includes(task.status)) {
       throw new Error('Invalid task or mutated trusted goal');
@@ -160,7 +192,8 @@ function summarize(state) {
   if (state.status === 'stopped') return;
   const unfinished = state.tasks.filter((task) => !TERMINAL.has(task.status));
   if (!unfinished.length) {
-    state.status = state.tasks.some((task) => task.status === 'blocked') ? 'blocked' : 'delivered';
+    state.status = state.tasks.some((task) => task.status === 'blocked') ? 'blocked' :
+      stateTarget(state) === 'browser-preview' ? 'browser-preview-complete' : 'delivered';
     state.activeTaskId = null;
   } else {
     const active = state.tasks.find((task) => task.id === state.activeTaskId);
@@ -274,7 +307,7 @@ function repairFollowUp(state, task, now) {
     id,
     goal: task.goal,
     dependsOn: task.dependsOn,
-  }, now);
+  }, now, taskTarget(task));
   followUp.sourceTaskId = task.id;
   followUp.followUpDepth = task.followUpDepth + 1;
   followUp.evidence.repairRequest = {
@@ -343,8 +376,19 @@ function applyReceipt(state, task, action, receipt, now) {
       if (!problem) transition(task, 'deploy', now);
       break;
     case 'deploy':
-      problem = state.mode === 'real' ? null : deploymentGate(task, receipt, state.mode);
-      if (!problem) transition(task, 'accept', now);
+      if (stateTarget(state) === 'browser-preview') {
+        problem = browserPreviewGate(task, receipt);
+        if (!problem) {
+          task.status = 'delivered';
+          task.delivery = 'BROWSER_PREVIEW';
+          task.result = 'browser-preview-complete';
+          task.updatedAt = now;
+          task.lastProgressAt = now;
+        }
+      } else {
+        problem = state.mode === 'real' ? null : deploymentGate(task, receipt, state.mode);
+        if (!problem) transition(task, 'accept', now);
+      }
       break;
     case 'accept':
       problem = state.mode === 'real' ? null : acceptanceGate(task, receipt, state.mode);
@@ -371,7 +415,7 @@ export async function advance(input, adapter, { now = Date.now(), persist = asyn
   now = time(now);
   if (now < input.updatedAt) now = input.updatedAt;
   const state = clone(input);
-  if (TERMINAL.has(state.status)) return state;
+  if (STATE_TERMINAL.has(state.status)) return state;
   const save = async () => {
     state.updatedAt = now;
     await persist(clone(state));
@@ -391,7 +435,7 @@ export async function advance(input, adapter, { now = Date.now(), persist = asyn
     return save();
   }
   settle(state, now);
-  if (TERMINAL.has(state.status)) return save();
+  if (STATE_TERMINAL.has(state.status)) return save();
   let task = state.tasks.find((item) => item.id === state.activeTaskId);
   if (!task || TERMINAL.has(task.status) || task.status === 'repair') {
     task = state.tasks.find((item) => item.status === 'queued' &&
@@ -454,7 +498,7 @@ export async function advance(input, adapter, { now = Date.now(), persist = asyn
     try {
       const existing = state.budget.reservations[intent.key];
       const costBound = existing ? existing : await adapter.quoteInferenceBudget?.(action, freeze(clone(task)), freeze({
-        mode: state.mode, now, runId: state.runId, idempotencyKey: intent.key,
+        mode: state.mode, completionTarget: stateTarget(state), now, runId: state.runId, idempotencyKey: intent.key,
         attempt: intent.attempt, evidence: clone(task.evidence),
       }));
       reserveInferenceBudget(state, adapter.config, {
@@ -496,6 +540,7 @@ export async function advance(input, adapter, { now = Date.now(), persist = asyn
   try {
     result = await adapter.execute(action, freeze(clone(task)), freeze({
       mode: state.mode,
+      completionTarget: stateTarget(state),
       now,
       runId: state.runId,
       idempotencyKey: intent.key,
@@ -584,7 +629,7 @@ export async function runLoop(input, adapter, {
   for (let step = 0; step < maxSteps; step++) {
     const current = virtualTime ? virtualNow : time(typeof now === 'function' ? now() : now);
     state = await advance(state, adapter, { now: current, persist, stop: await stop() });
-    if (TERMINAL.has(state.status) || state.status === 'stopped') return state;
+    if (STATE_TERMINAL.has(state.status) || state.status === 'stopped') return state;
     if (state.status === 'waiting') {
       if (!virtualTime) return state;
       virtualNow = Math.max(current, state.nextWakeAt);
