@@ -202,6 +202,102 @@ test('existing merges must have the exact tested tree before returning a success
   }
 });
 
+function browserPreviewFixture() {
+  const candidate = 'b'.repeat(40);
+  const merge = 'c'.repeat(40);
+  const tree = 'd'.repeat(40);
+  const configured = {
+    ...config,
+    enabled: true,
+    stop: false,
+    completionTarget: 'browser-preview',
+    workflows: { worker: 'factory-worker.yml', device: 'factory-device.yml', browserPreview: 'web-preview.yml' },
+    browserPreview: { environment: 'github-pages', url: 'https://vasiliynovikov.github.io/TzOneDrive/' },
+  };
+  const run = {
+    id: 700, head_sha: merge, event: 'push', path: '.github/workflows/web-preview.yml',
+    status: 'completed', conclusion: 'success'
+  };
+  const jobs = ['build', 'deploy'].map(name => ({ name, status: 'completed', conclusion: 'success' }));
+  const artifact = { id: 701, name: 'github-pages', expired: false, workflow_run: { id: run.id } };
+  const deployment = { id: 702, sha: merge, environment: 'github-pages' };
+  const status = { state: 'success', environment_url: 'https://vasiliynovikov.github.io/TzOneDrive/' };
+  const publicFetches = [];
+  const api = {
+    fetch: async (url, options) => {
+      publicFetches.push({ url, options });
+      return new Response(JSON.stringify({ schemaVersion: 1, commit: merge, buildId: merge }), {
+        headers: { 'content-length': '100' }
+      });
+    },
+    request: async (method, path) => {
+      assert.equal(method, 'GET');
+      if (path === '') return { full_name: config.repository, default_branch: 'master' };
+      if (path === '/commits/master') return { sha: merge };
+      if (path === `/contents/factory/trusted-config.json?ref=${merge}`) return jsonFile(configured);
+      if (path === '/pulls/42') return {
+        number: 42, merged: true, merge_commit_sha: merge, body: marker('one', 'publish-key'),
+        head: { sha: candidate, repo: { full_name: config.repository } },
+        base: { ref: 'master' }, user: { login: config.appBotLogin }
+      };
+      if (path === `/git/commits/${candidate}` || path === `/git/commits/${merge}`) return { tree: { sha: tree } };
+      throw new Error(`Unexpected browser preview read: ${path}`);
+    },
+    list: async path => {
+      if (path === `/actions/workflows/web-preview.yml/runs?event=push&head_sha=${merge}`) return [run];
+      if (path === `/actions/runs/${run.id}/jobs`) return jobs;
+      if (path === `/actions/runs/${run.id}/artifacts`) return [artifact];
+      if (path === '/deployments?environment=github-pages&sha=' + merge) return [deployment];
+      if (path === `/deployments/${deployment.id}/statuses`) return [status];
+      throw new Error(`Unexpected browser preview list: ${path}`);
+    },
+  };
+  return { api, configured, candidate, merge, tree, run, jobs, artifact, deployment, status, publicFetches };
+}
+
+test('browser preview observation binds merged PR, Pages workflow, artifact, deployment and published build', async () => {
+  const fixture = browserPreviewFixture();
+  const adapter = new GitHubAdapter({ api: fixture.api });
+  const observed = await adapter.observeBrowserPreview({
+    taskId: 'one', key: 'publish-key', number: 42, candidateHead: fixture.candidate,
+    mergeSha: fixture.merge, packageSha256: 'e'.repeat(64)
+  });
+  assert.equal(observed.status, 'completed');
+  assert.equal(observed.result.result, 'browser-preview-complete');
+  assert.equal(observed.result.workflow, 'web-preview.yml');
+  assert.equal(observed.result.workflowRunId, fixture.run.id);
+  assert.equal(observed.result.artifactId, fixture.artifact.id);
+  assert.equal(observed.result.deploymentId, fixture.deployment.id);
+  assert.equal(observed.result.buildId, fixture.merge);
+  assert.equal(observed.result.publishedBuildId, fixture.merge);
+  assert.equal(fixture.publicFetches.length, 1);
+  assert.equal(fixture.publicFetches[0].options.headers, undefined);
+});
+
+test('browser preview observation rejects wrong, stale or inconclusive publication evidence', async (t) => {
+  const cases = [
+    ['pending run', fixture => { fixture.run.status = 'in_progress'; }, async result => assert.equal(result.status, 'pending')],
+    ['failed run', fixture => { fixture.run.conclusion = 'failure'; }, async result => assert.equal(result.status, 'failed')],
+    ['failed deploy job', fixture => { fixture.jobs[1].conclusion = 'cancelled'; }, async result => assert.equal(result.status, 'failed')],
+    ['expired artifact', fixture => { fixture.artifact.expired = true; }, async result => assert.equal(result.status, 'failed')],
+    ['wrong workflow path', fixture => { fixture.run.path = '.github/workflows/ci.yml'; }, async result => assert.equal(result.status, 'pending')],
+    ['wrong deployment environment', fixture => { fixture.deployment.environment = 'production'; }, async (_result, promise) => assert.rejects(promise, /deployment/)],
+    ['wrong published build', fixture => {
+      fixture.api.fetch = async () => new Response(JSON.stringify({ schemaVersion: 1, commit: 'f'.repeat(40), buildId: 'f'.repeat(40) }));
+    }, async result => assert.equal(result.status, 'failed')],
+  ];
+  for (const [name, mutate, check] of cases) await t.test(name, async () => {
+    const fixture = browserPreviewFixture();
+    mutate(fixture);
+    const adapter = new GitHubAdapter({ api: fixture.api });
+    const promise = adapter.observeBrowserPreview({
+      taskId: 'one', key: 'publish-key', number: 42, candidateHead: fixture.candidate,
+      mergeSha: fixture.merge, packageSha256: 'e'.repeat(64)
+    });
+    await check(await promise.catch(error => error), promise);
+  });
+});
+
 function dispatchFixture(stage = 'plan') {
   const configured = { ...config, enabled: true, stop: false };
   const state = createState([{ id: 'one', goal: 'Trusted synthetic goal' }], { mode: 'real', now: Date.now() });
@@ -497,6 +593,40 @@ test('device authorization rejects unmerged, unreviewed or unrelated physical ha
     mutate(fixture);
     await assert.rejects(authorizeDispatch(fixture.api, fixture.inputs, fixture.env));
   }
+});
+
+test('browser-preview target cannot authorize or invoke the TV device workflow', async () => {
+  const fixture = dispatchFixture('deploy');
+  fixture.state.completionTarget = 'browser-preview';
+  fixture.task.completionTarget = 'browser-preview';
+  await assert.rejects(authorizeDispatch(fixture.api, fixture.inputs, fixture.env), /cannot dispatch the TV workflow/);
+
+  const preview = browserPreviewFixture();
+  const adapter = await createAdapter({ api: preview.api, config: preview.configured, env: fixture.env });
+  adapter.dispatchRun = async () => assert.fail('Browser preview must not dispatch factory-device.yml');
+  let checkpointed = false;
+  const result = await adapter.execute('deploy', fixture.task, {
+    completionTarget: 'browser-preview',
+    idempotencyKey: 'synthetic-key',
+    now: Date.now(),
+    evidence: {
+      ...fixture.task.evidence,
+      pr: { ...fixture.task.evidence.pr, publishKey: 'publish-key', prNumber: 42 },
+      validate: {
+        ...fixture.task.evidence.validate,
+        testedSha: preview.candidate,
+        package: { ...fixture.task.evidence.validate.package, sha256: 'e'.repeat(64) },
+      },
+      merge: { merged: true, headSha: preview.candidate, mergeSha: preview.merge },
+    },
+    async checkpointPending(receipt) {
+      checkpointed = true;
+      assert.equal(receipt.ticket.workflow, 'web-preview.yml');
+    },
+  });
+  assert.equal(checkpointed, true);
+  assert.equal(result.verdict, 'PASS');
+  assert.equal(result.result, 'browser-preview-complete');
 });
 
 test('public deployment artifacts and embedded acceptance cannot supply private transport authentication', async () => {

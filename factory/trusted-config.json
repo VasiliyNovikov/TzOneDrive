@@ -4,6 +4,7 @@
   "owner": "VasiliyNovikov",
   "enabled": false,
   "stop": true,
+  "completionTarget": "browser-preview",
   "ledgerBranch": "factory-ledger",
   "appBotLogin": "tzonedrivefactory[bot]",
   "appId": 4941551,
@@ -12,7 +13,12 @@
   },
   "workflows": {
     "worker": "factory-worker.yml",
-    "device": "factory-device.yml"
+    "device": "factory-device.yml",
+    "browserPreview": "web-preview.yml"
+  },
+  "browserPreview": {
+    "environment": "github-pages",
+    "url": "https://vasiliynovikov.github.io/TzOneDrive/"
   },
   "limits": {
     "maxFiles": 20,

@@ -44,7 +44,7 @@ export class GitHubAPI {
     const items = [];
     for (let page = 1; page <= limit; page++) {
       const result = await this.request('GET', `${path}${path.includes('?') ? '&' : '?'}per_page=100&page=${page}`);
-      const batch = Array.isArray(result) ? result : result.workflow_runs || result.artifacts;
+      const batch = Array.isArray(result) ? result : result.workflow_runs || result.artifacts || result.jobs;
       if (!Array.isArray(batch)) throw new Error('Unexpected paginated GitHub response');
       items.push(...batch);
       if (batch.length < 100) return items;

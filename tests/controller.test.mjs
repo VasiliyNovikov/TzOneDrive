@@ -13,7 +13,8 @@ import { StateLockedError, withStore } from '../factory/store.mjs';
 
 const NOW = 1000000;
 const backlog = [{ id: 'feature', goal: 'Show trusted fixture files on the TV.' }];
-const initial = (limits = {}, mode = 'mock') => createState(backlog, { now: NOW, mode, limits });
+const initial = (limits = {}, mode = 'mock', completionTarget = 'physical-tv') =>
+  createState(backlog, { now: NOW, mode, limits, completionTarget });
 const drive = (state, adapter, extra = {}) => runLoop(state, adapter, { now: NOW, virtualTime: state.mode === 'mock', ...extra });
 const budgetConfig = cap => ({ inferenceBudget: { cumulativeCapUsdCents: cap } });
 
@@ -119,6 +120,21 @@ test('mock completes the full lifecycle; completed state dispatches nothing on r
   const resumed = await drive(state, { execute() { assert.fail('Must not rerun delivered task'); } });
   assert.deepEqual(resumed, state);
   assert.equal(Object.keys(adapter.ledger.effects).length, 7);
+});
+
+test('browser-preview target completes after synthetic preview publication without TV acceptance', async () => {
+  const adapter = await createMockAdapter();
+  const state = await drive(initial({}, 'mock', 'browser-preview'), adapter);
+  assert.equal(state.status, 'browser-preview-complete');
+  assert.equal(state.completionTarget, 'browser-preview');
+  assert.equal(state.tasks[0].delivery, 'BROWSER_PREVIEW');
+  assert.equal(state.tasks[0].result, 'browser-preview-complete');
+  assert.deepEqual(state.tasks[0].history.filter((item) => item.type === 'receipt').map((item) => item.action),
+    ['plan', 'implement', 'pr', 'validate', 'merge', 'deploy']);
+  assert.equal(state.tasks[0].evidence.deploy.label, 'SIMULATED browser preview — NOT PHYSICAL ACCEPTANCE');
+  assert.equal(state.tasks[0].evidence.accept, undefined);
+  const resumed = await drive(state, { execute() { assert.fail('Must not rerun completed browser preview task'); } });
+  assert.deepEqual(resumed, state);
 });
 
 test('only one active task executes; dependencies wait for delivery', async () => {
@@ -294,10 +310,42 @@ test('mock receipts cannot advance a real run or become physical delivery', asyn
       return receipt;
     },
   });
+
   assert.equal(result.status, 'blocked');
   assert.equal(result.tasks[0].blockedReason, 'simulated-evidence-mode-mismatch');
   assert.equal(result.tasks[0].evidence.merge, undefined);
   await assert.rejects(runLoop(initial({}, 'real'), {}, { virtualTime: true }), /only permitted for mock/);
+});
+
+test('completion target is durable state identity and cannot be tampered on resume', async () => {
+  const state = initial({}, 'mock', 'browser-preview');
+  state.completionTarget = 'physical-tv';
+  await assert.rejects(advance(state, {}), /completionTarget|trusted goal|task/);
+  const taskChanged = initial({}, 'mock', 'browser-preview');
+  taskChanged.tasks[0].completionTarget = 'physical-tv';
+  await assert.rejects(advance(taskChanged, {}), /mutated trusted goal|task/);
+});
+
+test('browser-preview publication gate rejects stale or unrelated synthetic receipts', async (t) => {
+  const mutations = [
+    ['wrong target', result => { result.target = 'physical-tv'; }],
+    ['wrong merge', result => { result.mergeSha = 'f'.repeat(40); }],
+    ['wrong environment', result => { result.environment = 'production'; }],
+    ['wrong package', result => { result.packageSha256 = 'f'.repeat(64); }],
+    ['missing deployment', result => { delete result.deploymentId; }],
+    ['tree mismatch', result => { result.mergedTree = 'f'.repeat(40); }],
+  ];
+  for (const [name, mutate] of mutations) await t.test(name, async () => {
+    const mock = await createMockAdapter();
+    const state = await drive(initial({}, 'mock', 'browser-preview'), { async execute(action, task, context) {
+      assert.notEqual(action, 'accept');
+      const result = await mock.execute(action, task, context);
+      if (action === 'deploy') mutate(result);
+      return result;
+    } });
+    assert.equal(state.status, 'blocked');
+    assert.equal(state.tasks[0].evidence.accept, undefined);
+  });
 });
 
 test('legacy mock receipts cannot be relabelled into real delivery, even with physical-looking fields', async (t) => {
@@ -555,6 +603,19 @@ test('CLI persists a run, resumes without duplicate effects, and refuses mock-to
   const real = spawnSync(process.execPath, ['factory/main.mjs', 'real', '--state-dir', directory], { encoding: 'utf8' });
   assert.equal(real.status, 1);
   assert.match(real.stderr, /Cannot reuse mock state/);
+});
+
+test('CLI persists immutable completion target across resumes', async (t) => {
+  const directory = await fixture(t);
+  const args = ['factory/main.mjs', 'mock', '--state-dir', directory, '--completion-target', 'browser-preview'];
+  const first = spawnSync(process.execPath, args, { encoding: 'utf8' });
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(JSON.parse(first.stdout).status, 'browser-preview-complete');
+  const changed = spawnSync(process.execPath, [
+    'factory/main.mjs', 'mock', '--state-dir', directory, '--completion-target', 'physical-tv'
+  ], { encoding: 'utf8' });
+  assert.equal(changed.status, 1);
+  assert.match(changed.stderr, /completion target is immutable/);
 });
 
 test('CLI can resume the same initialization arguments but cannot mutate its trusted backlog', async (t) => {
